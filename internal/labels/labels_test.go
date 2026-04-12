@@ -66,6 +66,7 @@ func TestToEnv(t *testing.T) {
 		Class:                          ClassOverlay,
 		KernelABIID:                    "sha256:abc123",
 		KernelVersion:                  "6.12.61",
+		OSVersion:                      "2.119.*",
 		Prefix + "future-thing":        "x",
 		"unrelated":                    "ignored",
 	}
@@ -78,6 +79,7 @@ func TestToEnv(t *testing.T) {
 		"EXTENSION_IMAGE_FUTURE_THING=x",
 		"EXTENSION_IMAGE_KERNEL_ABI_ID=sha256:abc123",
 		"EXTENSION_IMAGE_KERNEL_VERSION=6.12.61",
+		"EXTENSION_IMAGE_OS_VERSION=2.119.*",
 	}
 	sort.Strings(expected)
 

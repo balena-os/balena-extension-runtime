@@ -67,6 +67,39 @@ func TestExecuteIfPresentEnvVars(t *testing.T) {
 	assert.Contains(t, content, "EXTENSION_IMAGE_KERNEL_ABI_ID=sha256:abc123")
 }
 
+// TestExecuteIfPresentSanitizesEnv asserts that the runtime's process env
+// does NOT leak into hook subprocesses. Inherited vars like containerd auth
+// tokens or TTRPC addresses would be a privileged-runtime privacy leak.
+// Hooks must see only PATH, EXTENSION_ROOTFS, and the extension label env.
+func TestExecuteIfPresentSanitizesEnv(t *testing.T) {
+	// Set a sentinel var in the test's (parent) process env. If the hook
+	// inherits, it'll dump this via `env` into the output file.
+	t.Setenv("BALENA_RUNTIME_SECRET_SENTINEL", "must-not-leak-to-hook")
+
+	rootfs := t.TempDir()
+	hookDir := filepath.Join(rootfs, "hooks")
+	require.NoError(t, os.MkdirAll(hookDir, 0o755))
+
+	envFile := filepath.Join(t.TempDir(), "env")
+	hookScript := "#!/bin/sh\nenv > " + envFile + "\n"
+	scriptPath := filepath.Join(hookDir, "create")
+	require.NoError(t, os.WriteFile(scriptPath, []byte(hookScript), 0o755))
+
+	err := ExecuteIfPresent(testLogger, rootfs, "hooks/create",
+		map[string]string{"io.balena.image.class": "overlay"})
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(envFile)
+	require.NoError(t, err)
+	content := string(data)
+
+	assert.NotContains(t, content, "BALENA_RUNTIME_SECRET_SENTINEL",
+		"hook must not inherit parent process env")
+	assert.Contains(t, content, "PATH=/usr/sbin:/usr/bin:/sbin:/bin")
+	assert.Contains(t, content, "EXTENSION_ROOTFS="+rootfs)
+	assert.Contains(t, content, "EXTENSION_IMAGE_CLASS=overlay")
+}
+
 func TestExecuteIfPresentFailure(t *testing.T) {
 	rootfs := t.TempDir()
 	hookDir := filepath.Join(rootfs, "hooks")
@@ -79,6 +112,20 @@ func TestExecuteIfPresentFailure(t *testing.T) {
 	err := ExecuteIfPresent(testLogger, rootfs, "hooks/create", map[string]string{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "hook")
+}
+
+func TestExecuteIfPresentRejectsTraversal(t *testing.T) {
+	rootfs := t.TempDir()
+	err := ExecuteIfPresent(testLogger, rootfs, "../../etc/passwd", map[string]string{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "escapes rootfs")
+}
+
+func TestExecuteIfPresentRejectsAbsolute(t *testing.T) {
+	rootfs := t.TempDir()
+	err := ExecuteIfPresent(testLogger, rootfs, "/etc/passwd", map[string]string{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must be relative")
 }
 
 func TestExecuteIfPresentDirectory(t *testing.T) {
