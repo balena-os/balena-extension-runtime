@@ -1,6 +1,7 @@
 package oci
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/opencontainers/runtime-spec/specs-go"
@@ -49,6 +50,39 @@ func TestStateLifecycle(t *testing.T) {
 
 	_, err = ReadState(containerID)
 	require.Error(t, err)
+}
+
+func TestValidateContainerID(t *testing.T) {
+	tests := []struct {
+		name    string
+		id      string
+		wantErr bool
+	}{
+		{name: "valid alphanumeric", id: "abc123", wantErr: false},
+		{name: "valid single char", id: "a", wantErr: false},
+		{name: "valid mixed separators", id: "a_b.c-d", wantErr: false},
+		{name: "valid starts with digit", id: "0abc", wantErr: false},
+		{name: "valid max length", id: strings.Repeat("a", 1024), wantErr: false},
+		{name: "invalid empty", id: "", wantErr: true},
+		{name: "invalid too long", id: strings.Repeat("a", 1025), wantErr: true},
+		{name: "invalid starts with underscore", id: "_abc", wantErr: true},
+		{name: "invalid starts with dot", id: ".abc", wantErr: true},
+		{name: "invalid starts with dash", id: "-abc", wantErr: true},
+		{name: "invalid space", id: "a b", wantErr: true},
+		{name: "invalid at sign", id: "a@b", wantErr: true},
+		{name: "invalid slash", id: "a/b", wantErr: true},
+		{name: "invalid newline", id: "a\nb", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateContainerID(tt.id)
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }
 
 func TestReadStateNotFound(t *testing.T) {

@@ -8,7 +8,7 @@ LDFLAGS := -s -w \
 	-X $(MODULE)/internal/version.Version=$(VERSION) \
 	-X $(MODULE)/internal/version.GitCommit=$(GIT_COMMIT)
 
-.PHONY: build clean test vet
+.PHONY: build clean test test-integration vet
 
 build: $(BINARY)
 	ln -f $(BINARY) $(LINK)
@@ -21,6 +21,9 @@ clean:
 
 test:
 	go test -v -race ./internal/...
+
+test-integration:
+	docker compose -f docker-compose.test.yml up --build --abort-on-container-exit --exit-code-from sut
 
 vet:
 	go vet ./...
