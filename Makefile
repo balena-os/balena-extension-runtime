@@ -1,4 +1,5 @@
 BINARY := balena-extension-runtime
+LINK := balena-extension-manager
 MODULE := github.com/balena-os/balena-extension-runtime
 VERSION ?= dev
 GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
@@ -9,11 +10,14 @@ LDFLAGS := -s -w \
 
 .PHONY: build clean test vet
 
-build:
-	CGO_ENABLED=0 go build -ldflags '$(LDFLAGS)' -o $(BINARY) ./cmd/balena-extension-runtime/
+build: $(BINARY)
+	ln -f $(BINARY) $(LINK)
+
+$(BINARY):
+	CGO_ENABLED=0 go build -ldflags '$(LDFLAGS)' -o $@ ./cmd/$@/
 
 clean:
-	rm -f $(BINARY)
+	rm -f $(BINARY) $(LINK)
 
 test:
 	go test -v -race ./internal/...

@@ -1,9 +1,19 @@
 package main
 
-import "os"
+import (
+	"os"
+	"path/filepath"
+)
 
 func main() {
-	if err := Execute(); err != nil {
+	var err error
+	switch filepath.Base(os.Args[0]) {
+	case "balena-extension-manager":
+		err = ExecuteManager()
+	default:
+		err = Execute()
+	}
+	if err != nil {
 		os.Exit(1)
 	}
 }
