@@ -2,9 +2,12 @@ package manager
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -95,6 +98,59 @@ func TestCleanup_RemovesStaleKernelContainers(t *testing.T) {
 
 	assert.Contains(t, removedIDs, "stale-container")
 	assert.NotContains(t, removedIDs, "match-container")
+}
+
+func TestCleanup_RemovesStaleABIContainers(t *testing.T) {
+	var removedIDs []string
+
+	kver := readHostKernelVersion(t)
+	// Use a known-fake ABI ID that will not match whatever the host has.
+	containers := []Container{
+		{ID: "stale-abi-cont", Image: "img1", State: "exited", Labels: map[string]string{
+			"io.balena.image.class":      "overlay",
+			"io.balena.image.kernel-version": kver,
+			"io.balena.image.kernel-abi-id":  "0000000000000000000000000000000000000000000000000000000000000000",
+		}},
+		{ID: "no-abi-contain", Image: "img2", State: "exited", Labels: map[string]string{
+			"io.balena.image.class":          "overlay",
+			"io.balena.image.kernel-version": kver,
+		}},
+	}
+
+	sock := testServer(t, func(method, path string, _ []byte) (int, []byte) {
+		switch {
+		case method == "GET" && strings.HasPrefix(path, "/containers/json"):
+			resp, _ := json.Marshal(containers)
+			return 200, resp
+		case method == "DELETE" && strings.HasPrefix(path, "/containers/"):
+			id := strings.TrimPrefix(path, "/containers/")
+			id = strings.SplitN(id, "?", 2)[0]
+			removedIDs = append(removedIDs, id)
+			return 204, nil
+		case method == "GET" && strings.HasPrefix(path, "/images/json"):
+			return 200, []byte("[]")
+		default:
+			return 404, nil
+		}
+	})
+
+	testEngineEnv(t, sock)
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	err := Cleanup(context.Background(), logger)
+	if err != nil {
+		t.Skipf("skipping: %v", err)
+	}
+
+	// The stale ABI container should be removed only if the host has a Module.symvers
+	// (so runningKernelABIID returns non-empty). If the host has no Module.symvers,
+	// both containers survive (ABI filter is skipped).
+	abiID := readHostKernelABIID(t)
+	if abiID != "" {
+		assert.Contains(t, removedIDs, "stale-abi-cont")
+	}
+	// Container without ABI label should never be removed.
+	assert.NotContains(t, removedIDs, "no-abi-contain")
 }
 
 func TestCleanup_RemovesOrphanedImages(t *testing.T) {
@@ -236,4 +292,22 @@ func readHostKernelVersion(t *testing.T) string {
 		release = release[:idx]
 	}
 	return release
+}
+
+// readHostKernelABIID computes the ABI ID of the running kernel.
+// Returns "" if Module.symvers is not available.
+func readHostKernelABIID(t *testing.T) string {
+	t.Helper()
+	data, err := os.ReadFile("/proc/sys/kernel/osrelease")
+	if err != nil {
+		t.Skipf("cannot read kernel release: %v", err)
+	}
+	release := strings.TrimSpace(string(data))
+	symvers := filepath.Join("/lib/modules", release, "Module.symvers")
+	content, err := os.ReadFile(symvers)
+	if err != nil {
+		return "" // No Module.symvers on this host
+	}
+	h := sha256.Sum256(content)
+	return hex.EncodeToString(h[:])
 }

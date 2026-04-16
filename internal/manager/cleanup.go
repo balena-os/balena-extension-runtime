@@ -2,9 +2,12 @@ package manager
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/balena-os/balena-extension-runtime/internal/labels"
@@ -17,7 +20,11 @@ func Cleanup(ctx context.Context, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	logger.Info("cleaning up extensions", "kernel", kver)
+	abiID, err := runningKernelABIID()
+	if err != nil {
+		logger.Warn("could not compute kernel ABI ID, skipping ABI filter", "err", err)
+	}
+	logger.Info("cleaning up extensions", "kernel", kver, "abi-id", abiID)
 
 	eng := NewEngine()
 
@@ -43,6 +50,16 @@ func Cleanup(ctx context.Context, logger *slog.Logger) error {
 		cKver := c.Labels[labels.KernelVersion]
 		if cKver != "" && cKver != kver {
 			logger.Info("removing stale extension container", "id", c.ID[:12], "kernel", cKver)
+			if err := eng.RemoveContainer(ctx, c.ID); err != nil {
+				logger.Warn("failed to remove stale container", "id", c.ID[:12], "err", err)
+			}
+			continue
+		}
+
+		// Remove containers with a kernel-abi-id label that doesn't match.
+		cAbiID := c.Labels[labels.KernelABIID]
+		if cAbiID != "" && abiID != "" && cAbiID != abiID {
+			logger.Info("removing stale extension container", "id", c.ID[:12], "abi-id", cAbiID)
 			if err := eng.RemoveContainer(ctx, c.ID); err != nil {
 				logger.Warn("failed to remove stale container", "id", c.ID[:12], "err", err)
 			}
@@ -92,4 +109,24 @@ func runningKernelVersion() (string, error) {
 		release = release[:idx]
 	}
 	return release, nil
+}
+
+// runningKernelABIID computes the sha256 of the running kernel's Module.symvers.
+// Returns "" if the file does not exist.
+func runningKernelABIID() (string, error) {
+	data, err := os.ReadFile("/proc/sys/kernel/osrelease")
+	if err != nil {
+		return "", fmt.Errorf("read kernel release: %w", err)
+	}
+	release := strings.TrimSpace(string(data))
+	symvers := filepath.Join("/lib/modules", release, "Module.symvers")
+	content, err := os.ReadFile(symvers)
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read Module.symvers: %w", err)
+	}
+	h := sha256.Sum256(content)
+	return hex.EncodeToString(h[:]), nil
 }
