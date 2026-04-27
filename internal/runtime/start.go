@@ -1,8 +1,11 @@
 package runtime
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"syscall"
 
 	"github.com/balena-os/balena-extension-runtime/internal/hooks"
 	"github.com/balena-os/balena-extension-runtime/internal/oci"
@@ -42,9 +45,18 @@ func Start(logger *slog.Logger, containerID string) error {
 		return fmt.Errorf("failed to write state: %w", err)
 	}
 
-	// Signal proxy to exit cleanly — container becomes "Exited (0)"
+	// Signal proxy to exit cleanly — container becomes "Exited (0)".
+	// Tolerate the proxy already being gone: between create and start the
+	// shim can crash, the OOM killer can fire, or an operator can SIGKILL
+	// the proxy directly. Mirror the tolerance Kill already applies for
+	// SIGTERM/SIGKILL — the state write above has already recorded the
+	// intended terminal state, so the missing process is informational.
 	if err := proxy.Start(state.Pid); err != nil {
-		return fmt.Errorf("failed to signal proxy: %w", err)
+		if errors.Is(err, os.ErrProcessDone) || errors.Is(err, syscall.ESRCH) {
+			logger.Info("proxy already exited before start signal", "pid", state.Pid)
+		} else {
+			return fmt.Errorf("failed to signal proxy: %w", err)
+		}
 	}
 
 	logger.Info("container started and exited", "id", containerID)
