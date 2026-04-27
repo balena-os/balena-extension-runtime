@@ -37,14 +37,14 @@ func Start(logger *slog.Logger, containerID string) error {
 		return err
 	}
 
-	// Signal proxy to exit cleanly — container becomes "Exited (0)"
-	if err := proxy.Start(state.Pid); err != nil {
-		return fmt.Errorf("failed to signal proxy: %w", err)
-	}
-
 	state.Status = specs.StateStopped
 	if err := oci.WriteState(state); err != nil {
 		return fmt.Errorf("failed to write state: %w", err)
+	}
+
+	// Signal proxy to exit cleanly — container becomes "Exited (0)"
+	if err := proxy.Start(state.Pid); err != nil {
+		return fmt.Errorf("failed to signal proxy: %w", err)
 	}
 
 	logger.Info("container started and exited", "id", containerID)
