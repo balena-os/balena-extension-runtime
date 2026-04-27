@@ -19,6 +19,7 @@ import (
 type fakeProxy struct {
 	spawnPID    int
 	spawnErr    error
+	spawnCalls  int
 	stoppedPIDs []int
 	stopErr     error
 }
@@ -27,6 +28,7 @@ func (f *fakeProxy) install(t *testing.T) {
 	t.Helper()
 	prevNew, prevStop := proxyNewProcess, proxyStop
 	proxyNewProcess = func(ctx context.Context, containerID string) (int, error) {
+		f.spawnCalls++
 		return f.spawnPID, f.spawnErr
 	}
 	proxyStop = func(pid int) error {
@@ -143,5 +145,32 @@ func TestCreate_SpawnFailure_NoStopCalled(t *testing.T) {
 
 	assert.Empty(t, fp.stoppedPIDs,
 		"Stop must not be invoked when proxy spawn itself failed")
+}
+
+func TestCreate_HookFailure_NoProxySpawned(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	fp := &fakeProxy{spawnPID: 5555}
+	fp.install(t)
+
+	bundle := validBundleWithAnnotations(t)
+	hooksDir := filepath.Join(bundle, "rootfs", "hooks")
+	require.NoError(t, os.MkdirAll(hooksDir, 0o755))
+	require.NoError(t, os.WriteFile(
+		filepath.Join(hooksDir, "create"),
+		[]byte("#!/bin/sh\nexit 1\n"),
+		0o755,
+	))
+
+	err := Create(testLogger(), "good-id", bundle, "")
+	require.Error(t, err)
+
+	assert.Zero(t, fp.spawnCalls,
+		"proxy must not be spawned when hooks/create fails")
+	assert.Empty(t, fp.stoppedPIDs,
+		"Stop must not be invoked — there is no proxy to clean up")
+
+	_, readErr := oci.ReadState("good-id")
+	require.Error(t, readErr, "no state should be written when hooks/create fails")
 }
 
