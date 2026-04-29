@@ -97,20 +97,15 @@ func (e *Engine) do(ctx context.Context, method, path string, body []byte) ([]by
 	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
 		deadline = d
 	}
-	_ = conn.SetDeadline(deadline)
+	if err := conn.SetDeadline(deadline); err != nil {
+		return nil, fmt.Errorf("set deadline: %w", err)
+	}
 
 	// Propagate ctx cancellation to in-flight reads/writes by closing the
 	// conn when ctx fires. Without this, cancellation only takes effect
 	// when the deadline above expires.
-	done := make(chan struct{})
-	defer close(done)
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = conn.Close()
-		case <-done:
-		}
-	}()
+	stopCancel := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopCancel()
 
 	// Build the request. Host "localhost" is arbitrary (ignored by the
 	// engine, which only cares about the path). http.NewRequestWithContext
