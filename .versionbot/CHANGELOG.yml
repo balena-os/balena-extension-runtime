@@ -1,0 +1,136 @@
+- commits:
+    - subject: "manager: address potential future issues"
+      hash: f4881c7994e17fc8ccdc78927fd04d0782d533c6
+      body: ""
+      footer:
+        Change-type: patch
+        change-type: patch
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+    - subject: "runtime: support threading for SIGTERM/SIGINT cancel"
+      hash: f495ac35aa53be758016a58e6bf35ad3e3a9e529
+      body: ""
+      footer:
+        Change-type: patch
+        change-type: patch
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+    - subject: "runtime: prevent rare stale pid reuse"
+      hash: f6b5381adc860ff029340f76a774b92f2b74b0fe
+      body: ""
+      footer:
+        Change-type: patch
+        change-type: patch
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+    - subject: "manager: defensive coding for hypothetical corruption"
+      hash: e7af2b648d97a84785752934ade0638561e91193
+      body: ""
+      footer:
+        Change-type: patch
+        change-type: patch
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+    - subject: "create_test: assert that a failing create does not write state"
+      hash: 4ab6667d1e4d21bb2d5b1b2a17017e935dc541f1
+      body: >
+        TestCreate_HookFailure_NoProxySpawned asserts that a failing
+        hooks/create
+
+        short-circuits Create before the proxy is spawned and before any state
+        is
+
+        written. A regression that ran the hook after spawn would leak a proxy
+
+        process; one that wrote state before the hook ran would leave a Created
+
+        container with no live proxy.
+      footer:
+        Change-type: patch
+        change-type: patch
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+    - subject: Add integration tests
+      hash: 2df66acae25d1fbf651a625405f527a4bee968f3
+      body: ""
+      footer:
+        Change-type: patch
+        change-type: patch
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+    - subject: "balena-extension-manager: create initial version"
+      hash: da2fd4bc1d30848f5e6c84669584ff76488d0558
+      body: ""
+      footer:
+        Change-type: major
+        change-type: major
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+    - subject: "balena-extension-runtime: do not error if proxy is already gone"
+      hash: f2e13e974336b17ab02b052c8e1518bb97876db0
+      body: |
+        Tolerate the proxy already being gone: between create and start the
+        shim can crash, the OOM killer can fire, or an operator can SIGKILL
+        the proxy directly.
+
+        Mirror the tolerance Kill already applied for SIGTERM/SIGKILL. The
+        state write above has already recorded the intended terminal state,
+        so the missing process is informational.
+      footer:
+        Change-type: patch
+        change-type: patch
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+    - subject: "balena-extension-runtime: persist the terminal state before signaling
+        the proxy"
+      hash: 5b8a8117c4b678c01f8cecdd00cc80447607f18b
+      body: >
+        If the order were reversed and WriteState failed, the proxy would have
+
+        already exited while state still claimed "created" — leaving soft-delete
+
+        blocked by its state-guard until --force.
+
+
+        With this ordering, a failed proxy signal leaves a stale process the
+        next
+
+        force-delete or reboot reaps, which is the cheaper failure mode
+
+        as XDG_RUNTIME_DIR is tmpfs.
+      footer:
+        Change-type: patch
+        change-type: patch
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+    - subject: "balena-extension-runtime: create initial revision"
+      hash: f066146c1de7e72e16c970cfe483bf9ad76ea9d4
+      body: ""
+      footer:
+        Change-type: minor
+        change-type: minor
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+  version: 1.0.0
+  title: ""
+  date: 2026-04-29T20:04:15.369Z
