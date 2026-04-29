@@ -69,6 +69,11 @@ func Create(logger *slog.Logger, containerID string, bundlePath string, pidFile 
 			if stopErr := proxyStop(pid); stopErr != nil {
 				logger.Warn("failed to stop proxy during cleanup", "pid", pid, "err", stopErr)
 			}
+			// Remove any partial state so a stale Pid can't be signalled
+			// later. RemoveState is a no-op if WriteState never ran.
+			if rmErr := oci.RemoveState(containerID); rmErr != nil {
+				logger.Warn("failed to remove partial state during cleanup", "id", containerID, "err", rmErr)
+			}
 		}
 	}()
 
