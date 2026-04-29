@@ -168,7 +168,10 @@ func (e *Engine) ListContainers(ctx context.Context, labelFilter string) ([]Cont
 		return nil, err
 	}
 	var containers []Container
-	return containers, json.Unmarshal(data, &containers)
+	if err := json.Unmarshal(data, &containers); err != nil {
+		return nil, fmt.Errorf("decode containers: %w", err)
+	}
+	return containers, nil
 }
 
 // RemoveContainer force-removes a container by ID.
@@ -185,7 +188,10 @@ func (e *Engine) ListImages(ctx context.Context, labelFilter string) ([]Image, e
 		return nil, err
 	}
 	var images []Image
-	return images, json.Unmarshal(data, &images)
+	if err := json.Unmarshal(data, &images); err != nil {
+		return nil, fmt.Errorf("decode images: %w", err)
+	}
+	return images, nil
 }
 
 // RemoveImage force-removes an image by ID.
