@@ -30,7 +30,7 @@ var cleanupCmd = &cobra.Command{
 		"Stale-OS pruning is safe only after the HUP rollback-health commit.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		staleOS, _ := cmd.Flags().GetBool("stale-os")
-		return manager.Cleanup(context.Background(), logger, manager.CleanupOpts{
+		return manager.Cleanup(cmd.Context(), logger, manager.CleanupOpts{
 			PruneStaleOS: staleOS,
 		})
 	},
@@ -47,6 +47,6 @@ func init() {
 	managerRootCmd.AddCommand(cleanupCmd)
 }
 
-func ExecuteManager() error {
-	return managerRootCmd.Execute()
+func ExecuteManager(ctx context.Context) error {
+	return managerRootCmd.ExecuteContext(ctx)
 }

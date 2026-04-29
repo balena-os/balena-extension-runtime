@@ -19,7 +19,7 @@ var createCmd = &cobra.Command{
 		if bundlePath == "" {
 			bundlePath = "."
 		}
-		return runtime.Create(logger, containerID, bundlePath, pidFile)
+		return runtime.Create(cmd.Context(), logger, containerID, bundlePath, pidFile)
 	},
 }
 

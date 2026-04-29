@@ -77,7 +77,7 @@ func TestCreate_WriteStateFailure_StopsProxy(t *testing.T) {
 	// A '/' in the ID is rejected by ValidateContainerID inside WriteState
 	// but passes everything upstream (annotations are already populated in
 	// the spec, so EnrichAnnotations returns immediately without ID use).
-	err := Create(testLogger(), "bad/id", bundle, "")
+	err := Create(context.Background(), testLogger(), "bad/id", bundle, "")
 	require.Error(t, err)
 
 	assert.Equal(t, []int{4242}, fp.stoppedPIDs,
@@ -97,7 +97,7 @@ func TestCreate_PidFileFailure_StopsProxy(t *testing.T) {
 	// Directory path as pid-file target causes os.WriteFile to fail.
 	pidFile := t.TempDir()
 
-	err := Create(testLogger(), "good-id", bundle, pidFile)
+	err := Create(context.Background(), testLogger(), "good-id", bundle, pidFile)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "pid file")
 
@@ -117,7 +117,7 @@ func TestCreate_Success_DoesNotStopProxy(t *testing.T) {
 	bundle := validBundleWithAnnotations(t)
 	pidFile := filepath.Join(t.TempDir(), "runtime.pid")
 
-	err := Create(testLogger(), "good-id", bundle, pidFile)
+	err := Create(context.Background(), testLogger(), "good-id", bundle, pidFile)
 	require.NoError(t, err)
 
 	assert.Empty(t, fp.stoppedPIDs, "proxy must not be stopped on success")
@@ -140,7 +140,7 @@ func TestCreate_SpawnFailure_NoStopCalled(t *testing.T) {
 
 	bundle := validBundleWithAnnotations(t)
 
-	err := Create(testLogger(), "good-id", bundle, "")
+	err := Create(context.Background(), testLogger(), "good-id", bundle, "")
 	require.Error(t, err)
 
 	assert.Empty(t, fp.stoppedPIDs,

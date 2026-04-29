@@ -28,8 +28,9 @@ var (
 )
 
 // Create validates the extension, runs the create hook, spawns the proxy,
-// and writes the initial OCI state.
-func Create(logger *slog.Logger, containerID string, bundlePath string, pidFile string) error {
+// and writes the initial OCI state. ctx bounds the proxy spawn and lets the
+// caller (typically containerd via SIGTERM) cancel an in-flight create.
+func Create(ctx context.Context, logger *slog.Logger, containerID string, bundlePath string, pidFile string) error {
 	bundlePath, err := oci.NormalizeBundlePath(bundlePath)
 	if err != nil {
 		return fmt.Errorf("invalid bundle path: %w", err)
@@ -57,7 +58,7 @@ func Create(logger *slog.Logger, containerID string, bundlePath string, pidFile 
 		return err
 	}
 
-	spawnCtx, cancel := context.WithTimeout(context.Background(), proxySpawnTimeout)
+	spawnCtx, cancel := context.WithTimeout(ctx, proxySpawnTimeout)
 	defer cancel()
 	pid, err := proxyNewProcess(spawnCtx, containerID)
 	if err != nil {
