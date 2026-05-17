@@ -39,6 +39,17 @@ type Image struct {
 	RepoTags []string          `json:"RepoTags"`
 }
 
+type ContainerInspect struct {
+	ID    string         `json:"Id"`
+	State ContainerState `json:"State"`
+}
+
+type ContainerState struct {
+	Status   string `json:"Status"`
+	Error    string `json:"Error"`
+	ExitCode int    `json:"ExitCode"`
+}
+
 // Engine talks to the Docker Engine API over a unix socket.
 type Engine struct {
 	socket string
@@ -173,6 +184,19 @@ func (e *Engine) ListContainers(ctx context.Context, labelFilter string) ([]Cont
 func (e *Engine) RemoveContainer(ctx context.Context, id string) error {
 	_, err := e.do(ctx, "DELETE", fmt.Sprintf("/containers/%s?force=true&v=true", url.PathEscape(id)), nil)
 	return err
+}
+
+// InspectContainer returns the per-container inspect payload for ID.
+func (e *Engine) InspectContainer(ctx context.Context, id string) (*ContainerInspect, error) {
+	data, err := e.do(ctx, "GET", fmt.Sprintf("/containers/%s/json", url.PathEscape(id)), nil)
+	if err != nil {
+		return nil, err
+	}
+	var ci ContainerInspect
+	if err := json.Unmarshal(data, &ci); err != nil {
+		return nil, fmt.Errorf("decode inspect: %w", err)
+	}
+	return &ci, nil
 }
 
 // ListImages returns images matching the given label filter.
