@@ -2,12 +2,13 @@ package manager
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
-	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -108,18 +109,91 @@ func handleConn(conn net.Conn, handler func(string, string, []byte) (int, []byte
 	conn.Write([]byte(resp))
 }
 
-// withModulesDir creates a temp rootfs with the given directory names under lib/modules/.
-func withModulesDir(t *testing.T, names ...string) string {
-	t.Helper()
-	rootfs := t.TempDir()
-	modulesDir := filepath.Join(rootfs, "lib", "modules")
-	if err := os.MkdirAll(modulesDir, 0o755); err != nil {
-		t.Fatalf("mkdirall: %v", err)
+// engineStub is a mock balena-engine API for cleanup tests. Populate
+// Containers/Images/Inspects before serving; read RemovedContainers/
+// RemovedImages after. All fields are mu-protected so tests can mutate
+// state from a concurrent goroutine while Cleanup is running.
+//
+// Inspect responses come from the Inspects map (ID -> raw JSON body).
+// InspectStatus overrides the response status for an ID (used to
+// simulate transient daemon failures). ImagesListStatus, if non-zero,
+// overrides /images/json's response status.
+type engineStub struct {
+	mu                sync.Mutex
+	Containers        []Container
+	Images            []Image
+	Inspects          map[string]string
+	InspectStatus     map[string]int
+	ImagesListStatus  int
+	RemovedContainers []string
+	RemovedImages     []string
+}
+
+func newEngineStub() *engineStub {
+	return &engineStub{
+		Inspects:      map[string]string{},
+		InspectStatus: map[string]int{},
 	}
-	for _, name := range names {
-		if err := os.Mkdir(filepath.Join(modulesDir, name), 0o755); err != nil {
-			t.Fatalf("mkdir: %v", err)
+}
+
+// handler returns a testServer handler bound to the stub's state. The
+// returned closure takes the stub's lock for every request, so concurrent
+// callers (e.g. a tweaker goroutine + Cleanup) are serialised on the
+// stub's view of the world.
+func (s *engineStub) handler() func(method, path string, body []byte) (int, []byte) {
+	return func(method, path string, _ []byte) (int, []byte) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		switch {
+		case method == "GET" && strings.HasPrefix(path, "/containers/json"):
+			resp, _ := json.Marshal(s.Containers)
+			return 200, resp
+		case method == "GET" && strings.HasPrefix(path, "/containers/") && strings.HasSuffix(path, "/json"):
+			id := strings.TrimSuffix(strings.TrimPrefix(path, "/containers/"), "/json")
+			if code, ok := s.InspectStatus[id]; ok {
+				return code, []byte(`{"message":"injected"}`)
+			}
+			if body, ok := s.Inspects[id]; ok {
+				return 200, []byte(body)
+			}
+			return 404, nil
+		case method == "DELETE" && strings.HasPrefix(path, "/containers/"):
+			id := strings.TrimPrefix(path, "/containers/")
+			id = strings.SplitN(id, "?", 2)[0]
+			s.RemovedContainers = append(s.RemovedContainers, id)
+			return 204, nil
+		case method == "GET" && strings.HasPrefix(path, "/images/json"):
+			if s.ImagesListStatus != 0 {
+				return s.ImagesListStatus, []byte(`{"message":"injected"}`)
+			}
+			resp, _ := json.Marshal(s.Images)
+			return 200, resp
+		case method == "DELETE" && strings.HasPrefix(path, "/images/"):
+			id := strings.TrimPrefix(path, "/images/")
+			id = strings.SplitN(id, "?", 2)[0]
+			s.RemovedImages = append(s.RemovedImages, id)
+			return 200, []byte("[]")
+		default:
+			return 404, nil
 		}
 	}
-	return rootfs
 }
+
+// removedContainersSnapshot returns a copy of RemovedContainers taken
+// under the stub's lock. Use this when reading from outside a request
+// handler, e.g. after a concurrent test goroutine finishes.
+func (s *engineStub) removedContainersSnapshot() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, len(s.RemovedContainers))
+	copy(out, s.RemovedContainers)
+	return out
+}
+
+// inspectJSON builds a minimal ContainerInspect body. Most cleanup tests
+// only need the State subfields.
+func inspectJSON(id, status, errMsg string, exitCode int) string {
+	return fmt.Sprintf(`{"Id":%q,"State":{"Status":%q,"Error":%q,"ExitCode":%d}}`,
+		id, status, errMsg, exitCode)
+}
+
