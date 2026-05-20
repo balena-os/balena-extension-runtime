@@ -127,6 +127,8 @@ type engineStub struct {
 	ImagesListStatus  int
 	RemovedContainers []string
 	RemovedImages     []string
+	Volumes           []Volume
+	RemovedVolumes    []string
 }
 
 func newEngineStub() *engineStub {
@@ -173,6 +175,16 @@ func (s *engineStub) handler() func(method, path string, body []byte) (int, []by
 			id = strings.SplitN(id, "?", 2)[0]
 			s.RemovedImages = append(s.RemovedImages, id)
 			return 200, []byte("[]")
+		case method == "GET" && strings.HasPrefix(path, "/volumes"):
+			resp, _ := json.Marshal(struct {
+				Volumes []Volume `json:"Volumes"`
+			}{Volumes: s.Volumes})
+			return 200, resp
+		case method == "DELETE" && strings.HasPrefix(path, "/volumes/"):
+			name := strings.TrimPrefix(path, "/volumes/")
+			name = strings.SplitN(name, "?", 2)[0]
+			s.RemovedVolumes = append(s.RemovedVolumes, name)
+			return 204, nil
 		default:
 			return 404, nil
 		}

@@ -288,3 +288,23 @@ func TestInspectContainer_ReturnsStateError(t *testing.T) {
 	assert.Equal(t, 128, got.State.ExitCode)
 	assert.Equal(t, "created", got.State.Status)
 }
+
+func TestCleanup_StaleOS_RemovesDanglingVolumes(t *testing.T) {
+	stub := newEngineStub()
+	stub.Volumes = []Volume{{Name: "v1"}, {Name: "v2"}}
+	sock := testServer(t, stub.handler())
+	testEngineEnv(t, sock)
+
+	osr := filepath.Join(t.TempDir(), "os-release")
+	require.NoError(t, os.WriteFile(osr, []byte(`VERSION_ID="6.5.10"`+"\n"), 0o644))
+	prev := osReleasePath
+	osReleasePath = osr
+	t.Cleanup(func() { osReleasePath = prev })
+
+	err := Cleanup(context.Background(), quietLogger(), CleanupOpts{PruneStaleOS: true})
+	require.NoError(t, err)
+
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	assert.ElementsMatch(t, []string{"v1", "v2"}, stub.RemovedVolumes)
+}

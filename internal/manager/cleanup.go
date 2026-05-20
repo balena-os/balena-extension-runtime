@@ -175,6 +175,19 @@ func Cleanup(ctx context.Context, logger *slog.Logger, opts CleanupOpts) error {
 			removalErrs = append(removalErrs, fmt.Errorf("remove stale image %s: %w", img.ID[:12], err))
 		}
 	}
+
+	// Volume sweep: catches dangling anonymous volumes.
+	vols, err := eng.ListVolumes(ctx, true)
+	if err != nil {
+		return errors.Join(append(removalErrs, fmt.Errorf("list dangling volumes: %w", err))...)
+	}
+	for _, v := range vols {
+		logger.Info("removing dangling extension volume", "name", v.Name)
+		if err := eng.RemoveVolume(ctx, v.Name); err != nil {
+			logger.Warn("failed to remove dangling volume", "name", v.Name, "err", err)
+			removalErrs = append(removalErrs, fmt.Errorf("remove volume %s: %w", v.Name, err))
+		}
+	}
 	return errors.Join(removalErrs...)
 }
 
