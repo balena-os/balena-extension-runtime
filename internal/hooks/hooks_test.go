@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -14,7 +15,7 @@ var testLogger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Le
 
 func TestExecuteIfPresentMissing(t *testing.T) {
 	rootfs := t.TempDir()
-	err := ExecuteIfPresent(testLogger, rootfs, "hooks/create", map[string]string{})
+	err := ExecuteIfPresent(testLogger, rootfs, "hooks/create", map[string]string{}, nil)
 	require.NoError(t, err)
 }
 
@@ -33,7 +34,7 @@ func TestExecuteIfPresentSuccess(t *testing.T) {
 		"io.balena.image.class": "overlay",
 	}
 
-	err := ExecuteIfPresent(testLogger, rootfs, "hooks/create", annotations)
+	err := ExecuteIfPresent(testLogger, rootfs, "hooks/create", annotations, nil)
 	require.NoError(t, err)
 
 	_, err = os.Stat(marker)
@@ -56,7 +57,7 @@ func TestExecuteIfPresentEnvVars(t *testing.T) {
 		"io.balena.image.kernel-abi-id":  "sha256:abc123",
 	}
 
-	err := ExecuteIfPresent(testLogger, rootfs, "hooks/start", annotations)
+	err := ExecuteIfPresent(testLogger, rootfs, "hooks/start", annotations, nil)
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(envFile)
@@ -86,7 +87,7 @@ func TestExecuteIfPresentSanitizesEnv(t *testing.T) {
 	require.NoError(t, os.WriteFile(scriptPath, []byte(hookScript), 0o755))
 
 	err := ExecuteIfPresent(testLogger, rootfs, "hooks/create",
-		map[string]string{"io.balena.image.class": "overlay"})
+		map[string]string{"io.balena.image.class": "overlay"}, nil)
 	require.NoError(t, err)
 
 	data, err := os.ReadFile(envFile)
@@ -109,21 +110,21 @@ func TestExecuteIfPresentFailure(t *testing.T) {
 	hookPath := filepath.Join(hookDir, "create")
 	require.NoError(t, os.WriteFile(hookPath, []byte(hookScript), 0o755))
 
-	err := ExecuteIfPresent(testLogger, rootfs, "hooks/create", map[string]string{})
+	err := ExecuteIfPresent(testLogger, rootfs, "hooks/create", map[string]string{}, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "hook")
 }
 
 func TestExecuteIfPresentRejectsTraversal(t *testing.T) {
 	rootfs := t.TempDir()
-	err := ExecuteIfPresent(testLogger, rootfs, "../../etc/passwd", map[string]string{})
+	err := ExecuteIfPresent(testLogger, rootfs, "../../etc/passwd", map[string]string{}, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "escapes rootfs")
 }
 
 func TestExecuteIfPresentRejectsAbsolute(t *testing.T) {
 	rootfs := t.TempDir()
-	err := ExecuteIfPresent(testLogger, rootfs, "/etc/passwd", map[string]string{})
+	err := ExecuteIfPresent(testLogger, rootfs, "/etc/passwd", map[string]string{}, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "must be relative")
 }
@@ -133,7 +134,31 @@ func TestExecuteIfPresentDirectory(t *testing.T) {
 	hookDir := filepath.Join(rootfs, "hooks", "create")
 	require.NoError(t, os.MkdirAll(hookDir, 0o755))
 
-	err := ExecuteIfPresent(testLogger, rootfs, "hooks/create", map[string]string{})
+	err := ExecuteIfPresent(testLogger, rootfs, "hooks/create", map[string]string{}, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "directory")
+}
+
+func TestExecuteIfPresent_ExportsMountVolumeEnv(t *testing.T) {
+	rootfs := t.TempDir()
+	hookDir := filepath.Join(rootfs, "hooks")
+	require.NoError(t, os.MkdirAll(hookDir, 0o755))
+
+	envFile := filepath.Join(t.TempDir(), "env")
+	hookScript := "#!/bin/sh\nenv | grep ^EXTENSION_ > " + envFile + "\n"
+	require.NoError(t, os.WriteFile(filepath.Join(hookDir, "create"), []byte(hookScript), 0o755))
+
+	specMounts := []specs.Mount{
+		{Destination: "/boot", Source: "/mnt/data/docker/volumes/v1/_data"},
+	}
+
+	err := ExecuteIfPresent(testLogger, rootfs, "hooks/create",
+		map[string]string{"io.balena.image.class": "overlay"},
+		specMounts,
+	)
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(envFile)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "EXTENSION_VOLUME_BOOT=/mnt/data/docker/volumes/v1/_data")
 }
