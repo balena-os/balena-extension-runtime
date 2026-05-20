@@ -89,5 +89,5 @@ func runDeleteHook(logger *slog.Logger, state *specs.State) error {
 	if err != nil {
 		return fmt.Errorf("resolve rootfs: %w", err)
 	}
-	return hooks.ExecuteIfPresent(logger, rootfs, "hooks/delete", state.Annotations)
+	return hooks.ExecuteIfPresent(logger, rootfs, "hooks/delete", state.Annotations, spec.Mounts)
 }
