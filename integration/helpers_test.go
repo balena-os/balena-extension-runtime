@@ -20,8 +20,23 @@ func TestMain(m *testing.M) {
 	}
 
 	waitForDocker()
+	pullFixtureImages()
 
 	os.Exit(m.Run())
+}
+
+// pullFixtureImages pre-pulls images the integration suite depends on.
+// Pulling here (rather than per-test) keeps tests hermetic: a missing
+// fixture is a TestMain failure visible up-front, not a per-test flake.
+// Network access is needed once per integration run.
+func pullFixtureImages() {
+	for _, ref := range []string{"busybox"} {
+		out, err := exec.Command("docker", "pull", ref).CombinedOutput()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "pull %s: %v\n%s", ref, err, out)
+			os.Exit(1)
+		}
+	}
 }
 
 // waitForDocker polls `docker info` until the daemon is ready or 30s elapse.
@@ -52,6 +67,20 @@ func buildExtensionImage(t *testing.T, tag string, extraLabels ...string) {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("buildExtensionImage(%s): %v\n%s", tag, err, out)
+	}
+}
+
+// buildExtensionImageNoClass creates a minimal local Docker image WITHOUT
+// the io.balena.image.class=overlay label. Used to assert that cleanup
+// ignores non-extension containers regardless of any other label they
+// carry or any failure state they're in.
+func buildExtensionImageNoClass(t *testing.T, tag string) {
+	t.Helper()
+	cmd := exec.Command("docker", "import", "-", tag)
+	cmd.Stdin = bytes.NewReader(make([]byte, 1024))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("buildExtensionImageNoClass(%s): %v\n%s", tag, err, out)
 	}
 }
 

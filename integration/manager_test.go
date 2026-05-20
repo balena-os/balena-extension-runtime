@@ -195,3 +195,95 @@ func TestCleanup_StaleOS_OSVersionGlobMatches(t *testing.T) {
 	imageID := dockerExec(t, "images", "--filter", "reference="+tag, "--format", "{{.ID}}")
 	assert.NotEmpty(t, imageID, "image whose os-version glob matches host must be retained")
 }
+
+// TestCleanup_Zombie_RemovesFailedStart provokes a real failed-Start
+// zombie by starting a container whose entrypoint binary does not exist
+// in the image,
+func TestCleanup_Zombie_RemovesFailedStart(t *testing.T) {
+	tag := uniqueName("ext-zombie-fs")
+	buildExtensionImage(t, tag)
+	defer dockerExecMayFail(t, "rmi", "-f", tag)
+
+	id := dockerExec(t, "create",
+		"--label", "io.balena.image.class=overlay",
+		tag, "no-such-binary")
+	defer dockerExecMayFail(t, "rm", "-f", id)
+
+	// Start must fail — empty rootfs cannot exec anything. A successful
+	// start means the engine has changed in a way that invalidates the
+	// fixture; fail loudly rather than skip.
+	_, startErr := dockerExecMayFail(t, "start", id)
+	require.Error(t, startErr,
+		"docker start must fail against an empty-rootfs image; "+
+			"engine behaviour has drifted and the zombie fixture is broken")
+
+	state := dockerExec(t, "inspect", "--format", "{{.State.Status}}", id)
+	stateErr := dockerExec(t, "inspect", "--format", "{{.State.Error}}", id)
+	require.NotEmpty(t, stateErr,
+		"engine did not populate State.Error for a failed-Start container "+
+			"(state=%q); the zombie-sweep predicate assumes this field is "+
+			"the daemon-authoritative signal", state)
+
+	t.Logf("zombie precondition: state=%q State.Error=%q", state, stateErr)
+
+	mgrOut, err := runManager(t, "cleanup")
+	require.NoError(t, err, "cleanup failed: %s", mgrOut)
+
+	out, _ := dockerExecMayFail(t, "ps", "-a", "--filter", "id="+id, "--format", "{{.ID}}")
+	assert.Empty(t, out,
+		"zombie container with State.Error set must be removed by cleanup; "+
+			"state at start was %q, State.Error was %q", state, stateErr)
+}
+
+// TestCleanup_Zombie_PreservesCleanExited pins the negative invariant
+// against a real engine.
+func TestCleanup_Zombie_PreservesCleanExited(t *testing.T) {
+	id := dockerExec(t, "create",
+		"--label", "io.balena.image.class=overlay",
+		"busybox", "true")
+	defer dockerExecMayFail(t, "rm", "-f", id)
+
+	_, err := dockerExecMayFail(t, "start", "-a", id)
+	require.NoError(t, err, "clean-exit fixture must start successfully")
+
+	state := dockerExec(t, "inspect", "--format", "{{.State.Status}}", id)
+	stateErr := dockerExec(t, "inspect", "--format", "{{.State.Error}}", id)
+	require.Equal(t, "exited", state, "fixture must be in exited state")
+	require.Empty(t, strings.TrimSpace(stateErr),
+		"fixture must have empty State.Error; got %q", stateErr)
+
+	mgrOut, mgrErr := runManager(t, "cleanup")
+	require.NoError(t, mgrErr, "cleanup failed: %s", mgrOut)
+
+	out := dockerExec(t, "ps", "-a", "--filter", "id="+id, "--format", "{{.ID}}")
+	assert.NotEmpty(t, out,
+		"clean-exited extension container with no State.Error must be preserved")
+}
+
+// TestCleanup_Zombie_IgnoresNonExtensionContainers pins the class filter
+// against a real engine: a non-extension container with State.Error
+// populated must not be removed.
+func TestCleanup_Zombie_IgnoresNonExtensionContainers(t *testing.T) {
+	tag := uniqueName("plain-zombie")
+	// No overlay class label → container is outside cleanup's scope
+	// regardless of any other label it carries.
+	buildExtensionImageNoClass(t, tag)
+	defer dockerExecMayFail(t, "rmi", "-f", tag)
+
+	id := dockerExec(t, "create", tag, "no-such-binary")
+	defer dockerExecMayFail(t, "rm", "-f", id)
+
+	_, startErr := dockerExecMayFail(t, "start", id)
+	require.Error(t, startErr,
+		"docker start must fail against an empty-rootfs image; "+
+			"engine behaviour has drifted and the fixture is broken")
+	stateErr := dockerExec(t, "inspect", "--format", "{{.State.Error}}", id)
+	require.NotEmpty(t, stateErr, "non-extension fixture must have State.Error populated")
+
+	mgrOut, err := runManager(t, "cleanup")
+	require.NoError(t, err, "cleanup failed: %s", mgrOut)
+
+	out := dockerExec(t, "ps", "-a", "--filter", "id="+id, "--format", "{{.ID}}")
+	assert.NotEmpty(t, out,
+		"non-extension zombie must be ignored by cleanup (class label filter)")
+}

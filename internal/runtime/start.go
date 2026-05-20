@@ -36,7 +36,7 @@ func Start(logger *slog.Logger, containerID string) error {
 		return fmt.Errorf("resolve rootfs: %w", err)
 	}
 
-	if err := hooks.ExecuteIfPresent(logger, rootfs, "hooks/start", state.Annotations); err != nil {
+	if err := hooks.ExecuteIfPresent(logger, rootfs, "hooks/start", state.Annotations, spec.Mounts); err != nil {
 		return err
 	}
 

@@ -258,3 +258,31 @@ func TestCheckSocket_NotASocket(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not a unix socket")
 }
+
+func TestListVolumes_Dangling(t *testing.T) {
+	sock := testServer(t, func(method, path string, _ []byte) (int, []byte) {
+		assert.Equal(t, "GET", method)
+		assert.True(t, strings.HasPrefix(path, "/volumes"))
+		expectedFilter := "filters=" + url.QueryEscape(`{"dangling":["true"]}`)
+		assert.Contains(t, path, expectedFilter)
+		return 200, []byte(`{"Volumes":[{"Name":"v1"},{"Name":"v2"}]}`)
+	})
+	eng := testEngine(sock)
+	vols, err := eng.ListVolumes(context.Background(), true)
+	require.NoError(t, err)
+	require.Len(t, vols, 2)
+	assert.Equal(t, "v1", vols[0].Name)
+}
+
+func TestRemoveVolume(t *testing.T) {
+	called := false
+	sock := testServer(t, func(method, path string, _ []byte) (int, []byte) {
+		called = true
+		assert.Equal(t, "DELETE", method)
+		assert.Equal(t, "/volumes/v1", path)
+		return 204, nil
+	})
+	eng := testEngine(sock)
+	require.NoError(t, eng.RemoveVolume(context.Background(), "v1"))
+	assert.True(t, called)
+}

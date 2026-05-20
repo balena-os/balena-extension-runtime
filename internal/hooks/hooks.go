@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/balena-os/balena-extension-runtime/internal/labels"
+	"github.com/balena-os/balena-extension-runtime/internal/mounts"
+	"github.com/opencontainers/runtime-spec/specs-go"
 )
 
 // hookTimeout bounds how long a single hook may run. containerd's own
@@ -30,7 +32,7 @@ const hookEnvPath = "/usr/sbin:/usr/bin:/sbin:/bin"
 //
 // Extension images are assumed trusted, so we do not defend against
 // symlinks under hooks/ redirecting execution to arbitrary host binaries.
-func ExecuteIfPresent(logger *slog.Logger, rootfs string, hookPath string, annotations map[string]string) error {
+func ExecuteIfPresent(logger *slog.Logger, rootfs string, hookPath string, annotations map[string]string, specMounts []specs.Mount) error {
 	if filepath.IsAbs(hookPath) {
 		return fmt.Errorf("hook path %q must be relative to rootfs", hookPath)
 	}
@@ -61,13 +63,15 @@ func ExecuteIfPresent(logger *slog.Logger, rootfs string, hookPath string, annot
 	// os.Environ(): the runtime runs with the full containerd process env,
 	// which can include auth tokens, TTRPC addresses, and API credentials.
 	// A hook script is extension-provided code and must not receive those.
-	// The contract is documented: hooks see PATH, EXTENSION_ROOTFS, and
-	// the extension label env (labels.ToEnv).
+	// The contract is documented: hooks see PATH, EXTENSION_ROOTFS, the
+	// extension label env (labels.ToEnv), and the mount volume env
+	// (mounts.ToEnv).
 	env := []string{
 		"PATH=" + hookEnvPath,
 		"EXTENSION_ROOTFS=" + rootfs,
 	}
 	env = append(env, labels.ToEnv(annotations)...)
+	env = append(env, mounts.ToEnv(specMounts)...)
 
 	ctx, cancel := context.WithTimeout(context.Background(), hookTimeout)
 	defer cancel()
