@@ -175,6 +175,29 @@ func Cleanup(ctx context.Context, logger *slog.Logger, opts CleanupOpts) error {
 			removalErrs = append(removalErrs, fmt.Errorf("remove stale image %s: %w", img.ID[:12], err))
 		}
 	}
+
+	// Volume sweep: reap stale extension volumes only.
+	vols, err := eng.ListVolumes(ctx, true)
+	if err != nil {
+		return errors.Join(append(removalErrs, fmt.Errorf("list dangling volumes: %w", err))...)
+	}
+	for _, v := range vols {
+		if v.Labels[labels.Class] != labels.ClassOverlay {
+			continue
+		}
+		if !stale(logger, v.Labels, kver, abiID, osVersion) {
+			continue
+		}
+		logger.Info("removing stale extension volume",
+			"name", v.Name,
+			"kernel-abi-id", v.Labels[labels.KernelABIID],
+			"os-version", v.Labels[labels.OSVersion],
+		)
+		if err := eng.RemoveVolume(ctx, v.Name); err != nil {
+			logger.Warn("failed to remove stale volume", "name", v.Name, "err", err)
+			removalErrs = append(removalErrs, fmt.Errorf("remove volume %s: %w", v.Name, err))
+		}
+	}
 	return errors.Join(removalErrs...)
 }
 

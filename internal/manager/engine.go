@@ -218,3 +218,37 @@ func (e *Engine) RemoveImage(ctx context.Context, id string) error {
 	_, err := e.do(ctx, "DELETE", fmt.Sprintf("/images/%s?force=true", url.PathEscape(id)), nil)
 	return err
 }
+
+type Volume struct {
+	Name   string            `json:"Name"`
+	Labels map[string]string `json:"Labels"`
+}
+
+type volumeListResponse struct {
+	Volumes []Volume `json:"Volumes"`
+}
+
+// ListVolumes returns volumes from the engine. If danglingOnly is true the
+// query is filtered to dangling=true — volumes with no container references.
+func (e *Engine) ListVolumes(ctx context.Context, danglingOnly bool) ([]Volume, error) {
+	path := "/volumes"
+	if danglingOnly {
+		path += "?filters=" + url.QueryEscape(`{"dangling":["true"]}`)
+	}
+	body, err := e.do(ctx, "GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	var resp volumeListResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("decode volume list: %w", err)
+	}
+	return resp.Volumes, nil
+}
+
+// RemoveVolume deletes a named volume. Errors are propagated as-is so the
+// caller's removalErrs accumulator can capture them.
+func (e *Engine) RemoveVolume(ctx context.Context, name string) error {
+	_, err := e.do(ctx, "DELETE", "/volumes/"+url.PathEscape(name), nil)
+	return err
+}

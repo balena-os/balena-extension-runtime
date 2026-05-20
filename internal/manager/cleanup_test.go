@@ -282,3 +282,39 @@ func TestInspectContainer_ReturnsStateError(t *testing.T) {
 	assert.Equal(t, 128, got.State.ExitCode)
 	assert.Equal(t, "created", got.State.Status)
 }
+
+// TestCleanup_StaleOS_RemovesStaleExtensionVolumes asserts the volume sweep
+// is ownership+staleness by label.
+func TestCleanup_StaleOS_RemovesStaleExtensionVolumes(t *testing.T) {
+	stub := newEngineStub()
+	stub.Volumes = []Volume{
+		{
+			Name:   "ext_kernel-modules_42befc76f4f8_boot",
+			Labels: overlayLabels(map[string]string{"io.balena.image.os-version": "2.118.*"}),
+		},
+		{
+			Name:   "ext_other_aabbccddeeff_lib_modules",
+			Labels: overlayLabels(map[string]string{"io.balena.image.os-version": "2.119.*"}),
+		},
+		{Name: "extra-firmware"},
+	}
+	sock := testServer(t, stub.handler())
+	testEngineEnv(t, sock)
+
+	osr := filepath.Join(t.TempDir(), "os-release")
+	require.NoError(t, os.WriteFile(osr, []byte(`VERSION_ID="2.119.0"`+"\n"), 0o644))
+	prev := osReleasePath
+	osReleasePath = osr
+	t.Cleanup(func() { osReleasePath = prev })
+
+	err := Cleanup(context.Background(), quietLogger(), CleanupOpts{PruneStaleOS: true})
+	require.NoError(t, err)
+
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	assert.ElementsMatch(t, []string{
+		"ext_kernel-modules_42befc76f4f8_boot",
+	}, stub.RemovedVolumes)
+	assert.NotContains(t, stub.RemovedVolumes, "ext_other_aabbccddeeff_lib_modules")
+	assert.NotContains(t, stub.RemovedVolumes, "extra-firmware")
+}
