@@ -144,6 +144,11 @@ func Cleanup(ctx context.Context, logger *slog.Logger, opts CleanupOpts) error {
 		if !stale(logger, c.Labels, kver, abiID, osVersion) {
 			continue
 		}
+		if err := runDeactivateHook(logger, c); err != nil {
+			logger.Warn("deactivate before prune failed; removing anyway",
+				"id", c.ID[:12], "err", err)
+			removalErrs = append(removalErrs, fmt.Errorf("deactivate stale container %s: %w", c.ID[:12], err))
+		}
 		logger.Info("removing stale extension container",
 			"id", c.ID[:12],
 			"kernel-version", c.Labels[labels.KernelVersion],

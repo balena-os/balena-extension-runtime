@@ -30,6 +30,14 @@ type Container struct {
 	Image  string            `json:"Image"`
 	State  string            `json:"State"`
 	Labels map[string]string `json:"Labels"`
+	Mounts []MountPoint      `json:"Mounts"`
+}
+
+// MountPoint is the subset of a container's mount entry we need.
+type MountPoint struct {
+	Type        string `json:"Type"`        // "volume", "bind", "tmpfs", ...
+	Source      string `json:"Source"`      // host path backing the mount
+	Destination string `json:"Destination"` // path inside the container
 }
 
 // Image is the subset of Docker's image JSON we need.
