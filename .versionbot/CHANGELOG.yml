@@ -1,4 +1,83 @@
 - commits:
+    - subject: "manager: add deactivate hook"
+      hash: 06fb5c76f7c7a012cfce10b486e941f62d29f061
+      body: >
+        This is called on extension cleanup if the extension provides one.
+
+
+        The deactivate hook is outside the OCI container lify-cycle, for
+        cleaning
+
+        up that cannot happen at delete time.
+      footer:
+        Change-type: patch
+        change-type: patch
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+    - subject: "balena-extension-runtime: propagate error message"
+      hash: 7b0608c566fab98f9b1e3d1e8c6b1240586d7614
+      body: ""
+      footer:
+        Change-type: patch
+        change-type: patch
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+    - subject: "manager: dangling volume removal"
+      hash: 90e5938556126858cd13d9c9301b2f21d984f169
+      body: ""
+      footer:
+        Change-type: minor
+        change-type: minor
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+    - subject: "runtime: make anonymous volumes path available to hooks"
+      hash: 667a1baea826a8bd427a4f3be8b84adffeb221f7
+      body: ""
+      footer:
+        Change-type: minor
+        change-type: minor
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+    - subject: "manager: cleanup sweep for container leftovers"
+      hash: bfd88630af5063f4fb266dfee0c75583fb868c17
+      body: |
+        Introduces a new cleanup sweep to remove container lefovers that
+        fail to properly create.
+      footer:
+        Change-type: patch
+        change-type: patch
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+    - subject: "create_test: fix test after Create gained a context parameter"
+      hash: 8d5efb05c248dcf0821163267824bc0975fa51bc
+      body: >
+        Commit f495ac35aa53 ("runtime: support threading for SIGTERM/SIGINT
+        cancel")
+
+        added a context.Context first parameter to Create but missed
+
+        TestCreate_HookFailure_NoProxySpawned, leaving the test file broken.
+      footer:
+        Change-type: patch
+        change-type: patch
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+  version: 1.1.0
+  title: ""
+  date: 2026-06-30T12:04:28.665Z
+- commits:
     - subject: "manager: address potential future issues"
       hash: f4881c7994e17fc8ccdc78927fd04d0782d533c6
       body: ""
