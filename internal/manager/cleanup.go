@@ -28,16 +28,26 @@ type CleanupOpts struct {
 	PruneStaleOS bool
 }
 
-// Cleanup removes extension containers and images. The dead-container
-// sweep always runs. When opts.PruneStaleOS is set, the stale predicate is
-// additionally applied — symmetrically to containers and images — using
-// three compatibility levels, all of which must be satisfied if claimed:
+// Cleanup removes extension containers and images.
+//
+// Two container-side sweeps run unconditionally:
+//
+//   1. Zombie sweep — engine-reported failed-Create containers.
+//
+//   2. Dead sweep — containers in State == "dead".
+//
+// When opts.PruneStaleOS is set, a third pass applies the stale-OS
+// predicate — symmetrically to containers and images — using three
+// compatibility levels, all of which must be satisfied if claimed:
 //
 //   - io.balena.image.kernel-abi-id (kernel-space ABI: symbol CRCs)
 //   - io.balena.image.kernel-version (userspace-to-kernel ABI)
 //   - io.balena.image.os-version (OS compatibility: libc, paths, hostapp)
 //
-// Absent labels make no claim at that level.
+// Absent labels make no claim at that level. The stale-OS pass is
+// gated because it's only safe after the rollback-health commit window —
+// outside that window, stale containers/images are the rollback target
+// and must be preserved.
 func Cleanup(ctx context.Context, logger *slog.Logger, opts CleanupOpts) error {
 	eng := NewEngine()
 	if err := eng.CheckSocket(); err != nil {
@@ -54,10 +64,37 @@ func Cleanup(ctx context.Context, logger *slog.Logger, opts CleanupOpts) error {
 	// errors are returned so the caller (typically a systemd unit) surfaces
 	// a non-zero exit on partial failure instead of masking it as a warning.
 	var removalErrs []error
-
-	// Dead sweep runs in both modes.
 	dropped := make(map[string]bool)
+
+	// Zombie sweep: containers whose runtime Create failed.
 	for _, c := range containers {
+		if c.State != "created" && c.State != "exited" {
+			continue
+		}
+		ci, err := eng.InspectContainer(ctx, c.ID)
+		if err != nil {
+			logger.Warn("failed to inspect container; skipping zombie check",
+				"id", c.ID[:12], "err", err)
+			continue
+		}
+		if ci.State.Error == "" {
+			continue
+		}
+		logger.Info("removing failed-Create extension container",
+			"id", c.ID[:12], "state", c.State, "error", ci.State.Error, "exit-code", ci.State.ExitCode)
+		if err := eng.RemoveContainer(ctx, c.ID); err != nil {
+			logger.Warn("failed to remove zombie container", "id", c.ID[:12], "err", err)
+			removalErrs = append(removalErrs, fmt.Errorf("remove zombie container %s: %w", c.ID[:12], err))
+			continue
+		}
+		dropped[c.ID] = true
+	}
+
+	// Dead sweep.
+	for _, c := range containers {
+		if dropped[c.ID] {
+			continue
+		}
 		if c.State != "dead" {
 			continue
 		}
@@ -107,6 +144,11 @@ func Cleanup(ctx context.Context, logger *slog.Logger, opts CleanupOpts) error {
 		if !stale(logger, c.Labels, kver, abiID, osVersion) {
 			continue
 		}
+		if err := runDeactivateHook(logger, c); err != nil {
+			logger.Warn("deactivate before prune failed; removing anyway",
+				"id", c.ID[:12], "err", err)
+			removalErrs = append(removalErrs, fmt.Errorf("deactivate stale container %s: %w", c.ID[:12], err))
+		}
 		logger.Info("removing stale extension container",
 			"id", c.ID[:12],
 			"kernel-version", c.Labels[labels.KernelVersion],
@@ -136,6 +178,29 @@ func Cleanup(ctx context.Context, logger *slog.Logger, opts CleanupOpts) error {
 		if err := eng.RemoveImage(ctx, img.ID); err != nil {
 			logger.Warn("failed to remove stale image", "id", img.ID[:12], "err", err)
 			removalErrs = append(removalErrs, fmt.Errorf("remove stale image %s: %w", img.ID[:12], err))
+		}
+	}
+
+	// Volume sweep: reap stale extension volumes only.
+	vols, err := eng.ListVolumes(ctx, true)
+	if err != nil {
+		return errors.Join(append(removalErrs, fmt.Errorf("list dangling volumes: %w", err))...)
+	}
+	for _, v := range vols {
+		if v.Labels[labels.Class] != labels.ClassOverlay {
+			continue
+		}
+		if !stale(logger, v.Labels, kver, abiID, osVersion) {
+			continue
+		}
+		logger.Info("removing stale extension volume",
+			"name", v.Name,
+			"kernel-abi-id", v.Labels[labels.KernelABIID],
+			"os-version", v.Labels[labels.OSVersion],
+		)
+		if err := eng.RemoveVolume(ctx, v.Name); err != nil {
+			logger.Warn("failed to remove stale volume", "name", v.Name, "err", err)
+			removalErrs = append(removalErrs, fmt.Errorf("remove volume %s: %w", v.Name, err))
 		}
 	}
 	return errors.Join(removalErrs...)

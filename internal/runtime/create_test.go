@@ -162,7 +162,7 @@ func TestCreate_HookFailure_NoProxySpawned(t *testing.T) {
 		0o755,
 	))
 
-	err := Create(testLogger(), "good-id", bundle, "")
+	err := Create(context.Background(), testLogger(), "good-id", bundle, "")
 	require.Error(t, err)
 
 	assert.Zero(t, fp.spawnCalls,

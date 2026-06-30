@@ -22,6 +22,11 @@ func main() {
 	default:
 		err = Execute(ctx)
 	}
+	if err != nil && logger != nil {
+		logger.Error("runtime invocation failed",
+			"argv", os.Args,
+			"err", err.Error())
+	}
 	CloseLogger()
 	if err != nil {
 		os.Exit(1)

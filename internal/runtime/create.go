@@ -54,7 +54,7 @@ func Create(ctx context.Context, logger *slog.Logger, containerID string, bundle
 		return fmt.Errorf("invalid extension: %w", err)
 	}
 
-	if err := hooks.ExecuteIfPresent(logger, rootfs, "hooks/create", spec.Annotations); err != nil {
+	if err := hooks.ExecuteIfPresent(logger, rootfs, "hooks/create", spec.Annotations, spec.Mounts); err != nil {
 		return err
 	}
 

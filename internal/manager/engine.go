@@ -30,6 +30,14 @@ type Container struct {
 	Image  string            `json:"Image"`
 	State  string            `json:"State"`
 	Labels map[string]string `json:"Labels"`
+	Mounts []MountPoint      `json:"Mounts"`
+}
+
+// MountPoint is the subset of a container's mount entry we need.
+type MountPoint struct {
+	Type        string `json:"Type"`        // "volume", "bind", "tmpfs", ...
+	Source      string `json:"Source"`      // host path backing the mount
+	Destination string `json:"Destination"` // path inside the container
 }
 
 // Image is the subset of Docker's image JSON we need.
@@ -37,6 +45,17 @@ type Image struct {
 	ID       string            `json:"Id"`
 	Labels   map[string]string `json:"Labels"`
 	RepoTags []string          `json:"RepoTags"`
+}
+
+type ContainerInspect struct {
+	ID    string         `json:"Id"`
+	State ContainerState `json:"State"`
+}
+
+type ContainerState struct {
+	Status   string `json:"Status"`
+	Error    string `json:"Error"`
+	ExitCode int    `json:"ExitCode"`
 }
 
 // Engine talks to the Docker Engine API over a unix socket.
@@ -175,6 +194,19 @@ func (e *Engine) RemoveContainer(ctx context.Context, id string) error {
 	return err
 }
 
+// InspectContainer returns the per-container inspect payload for ID.
+func (e *Engine) InspectContainer(ctx context.Context, id string) (*ContainerInspect, error) {
+	data, err := e.do(ctx, "GET", fmt.Sprintf("/containers/%s/json", url.PathEscape(id)), nil)
+	if err != nil {
+		return nil, err
+	}
+	var ci ContainerInspect
+	if err := json.Unmarshal(data, &ci); err != nil {
+		return nil, fmt.Errorf("decode inspect: %w", err)
+	}
+	return &ci, nil
+}
+
 // ListImages returns images matching the given label filter.
 func (e *Engine) ListImages(ctx context.Context, labelFilter string) ([]Image, error) {
 	path := fmt.Sprintf("/images/json?filters=%s", labelFilterQuery(labelFilter))
@@ -192,5 +224,39 @@ func (e *Engine) ListImages(ctx context.Context, labelFilter string) ([]Image, e
 // RemoveImage force-removes an image by ID.
 func (e *Engine) RemoveImage(ctx context.Context, id string) error {
 	_, err := e.do(ctx, "DELETE", fmt.Sprintf("/images/%s?force=true", url.PathEscape(id)), nil)
+	return err
+}
+
+type Volume struct {
+	Name   string            `json:"Name"`
+	Labels map[string]string `json:"Labels"`
+}
+
+type volumeListResponse struct {
+	Volumes []Volume `json:"Volumes"`
+}
+
+// ListVolumes returns volumes from the engine. If danglingOnly is true the
+// query is filtered to dangling=true — volumes with no container references.
+func (e *Engine) ListVolumes(ctx context.Context, danglingOnly bool) ([]Volume, error) {
+	path := "/volumes"
+	if danglingOnly {
+		path += "?filters=" + url.QueryEscape(`{"dangling":["true"]}`)
+	}
+	body, err := e.do(ctx, "GET", path, nil)
+	if err != nil {
+		return nil, err
+	}
+	var resp volumeListResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("decode volume list: %w", err)
+	}
+	return resp.Volumes, nil
+}
+
+// RemoveVolume deletes a named volume. Errors are propagated as-is so the
+// caller's removalErrs accumulator can capture them.
+func (e *Engine) RemoveVolume(ctx context.Context, name string) error {
+	_, err := e.do(ctx, "DELETE", "/volumes/"+url.PathEscape(name), nil)
 	return err
 }
