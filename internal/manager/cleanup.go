@@ -2,8 +2,6 @@ package manager
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -117,12 +115,12 @@ func Cleanup(ctx context.Context, logger *slog.Logger, opts CleanupOpts) error {
 		return errors.Join(append(removalErrs, fmt.Errorf("read running kernel version: %w", err))...)
 	}
 	// A failure here is distinct from the legitimate "" result that
-	// runningKernelABIID returns when Module.symvers is absent: we can't
-	// tell if abi-labelled images match the running kernel. The caller
-	// explicitly asked for a stale-OS sweep, so a failure to compute the
-	// predicate is returned as an error — silently degrading to dead-only
-	// mode would let disks fill with stale extensions after a HUP commit
-	// without anyone noticing.
+	// runningKernelABIID returns when the balena_kernel_abi cmdline token
+	// is absent: we can't tell if abi-labelled images match the running
+	// kernel. The caller explicitly asked for a stale-OS sweep, so a
+	// failure to compute the predicate is returned as an error: silently
+	// degrading to dead-only mode would let disks fill with stale
+	// extensions after a HUP commit without anyone noticing.
 	abiID, err := runningKernelABIID()
 	if err != nil {
 		return errors.Join(append(removalErrs, fmt.Errorf("compute kernel ABI ID: %w", err))...)
@@ -299,24 +297,27 @@ func runningKernelVersion() (string, error) {
 	return release, nil
 }
 
-// runningKernelABIID computes the sha256 of the running kernel's
-// Module.symvers. Returns "" with nil error if the file does not exist —
-// extensions that claim kernel-abi-id against such a device will fail
-// their claim naturally through the `stale` predicate.
+// runningKernelABIID returns the kernel identity the initrd published for
+// the booted kernel: the balena_kernel_abi cmdline token, which carries the
+// sha256 of the kernel image that was kexec'd. Returns "" with nil error
+// when the token is absent (stock kernel boot): extensions that claim
+// kernel-abi-id against such a device fail their claim naturally through the
+// `stale` predicate.
 func runningKernelABIID() (string, error) {
-	data, err := os.ReadFile("/proc/sys/kernel/osrelease")
+	data, err := os.ReadFile("/proc/cmdline")
 	if err != nil {
-		return "", fmt.Errorf("read kernel release: %w", err)
+		return "", fmt.Errorf("read /proc/cmdline: %w", err)
 	}
-	release := strings.TrimSpace(string(data))
-	symvers := filepath.Join("/lib/modules", release, "Module.symvers")
-	content, err := os.ReadFile(symvers)
-	if os.IsNotExist(err) {
-		return "", nil
+	return parseKernelABIID(string(data)), nil
+}
+
+// parseKernelABIID extracts the balena_kernel_abi token value from a kernel
+// command line, or "" when absent.
+func parseKernelABIID(cmdline string) string {
+	for _, tok := range strings.Fields(cmdline) {
+		if v, ok := strings.CutPrefix(tok, "balena_kernel_abi="); ok {
+			return v
+		}
 	}
-	if err != nil {
-		return "", fmt.Errorf("read Module.symvers: %w", err)
-	}
-	h := sha256.Sum256(content)
-	return hex.EncodeToString(h[:]), nil
+	return ""
 }
