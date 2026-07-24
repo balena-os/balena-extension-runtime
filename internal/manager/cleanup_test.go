@@ -151,7 +151,7 @@ func TestStale(t *testing.T) {
 			stale: true,
 		},
 		{
-			name: "abi claim against empty running abi (missing Module.symvers)",
+			name: "abi claim against empty running abi (absent balena_kernel_abi token, stock kernel)",
 			labels: map[string]string{
 				"io.balena.image.kernel-abi-id": "claim",
 			},
@@ -166,13 +166,13 @@ func TestStale(t *testing.T) {
 		})
 	}
 
-	t.Run("abi claim on device with no symvers fails (runningAbi empty)", func(t *testing.T) {
+	t.Run("abi claim on device with no balena_kernel_abi token fails (runningAbi empty)", func(t *testing.T) {
 		got := stale(
 			logger,
 			map[string]string{"io.balena.image.kernel-abi-id": "claim"},
 			runKver, "", runOs,
 		)
-		assert.True(t, got, "extension claiming abi against symvers-less device is stale")
+		assert.True(t, got, "extension claiming abi against a device with no published kernel-abi token is stale")
 	})
 }
 
@@ -249,6 +249,32 @@ func TestReadOSVersion(t *testing.T) {
 			}
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestParseKernelABIID(t *testing.T) {
+	tests := []struct {
+		name    string
+		cmdline string
+		want    string
+	}{
+		{"present", "console=tty1 balena_kernel_abi=0123abcd rootwait", "0123abcd"},
+		{"absent (stock kernel)", "console=tty1 rootwait", ""},
+		{"empty value", "balena_kernel_abi= rootwait", ""},
+		{"prefix of another token does not match", "not_balena_kernel_abi=x", ""},
+		// Real /proc/cmdline ends in a newline and often carries the token
+		// as the final field; Fields must swallow the trailing \n.
+		{"token last, trailing newline", "console=tty1 balena_kernel_abi=0123abcd\n", "0123abcd"},
+		// First match wins, matching mobynit's parser: a later duplicate
+		// must not override the initrd's first published value.
+		{"duplicate token keeps the first", "balena_kernel_abi=first balena_kernel_abi=second", "first"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := parseKernelABIID(tt.cmdline); got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
 		})
 	}
 }
