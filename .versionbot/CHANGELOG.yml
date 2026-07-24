@@ -1,4 +1,19 @@
 - commits:
+    - subject: "manager: read the running kernel identity from the cmdline token"
+      hash: 06d76bcb450ee9e824c3be741dc30a4d6d933205
+      body: |
+        The kernel-abi-id is now the checksum of the running kernel image.
+      footer:
+        Change-type: minor
+        change-type: minor
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+  version: 1.2.0
+  title: ""
+  date: 2026-07-24T11:49:41.069Z
+- commits:
     - subject: "manager: add deactivate hook"
       hash: 06fb5c76f7c7a012cfce10b486e941f62d29f061
       body: >
