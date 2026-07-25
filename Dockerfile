@@ -8,6 +8,8 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 
+RUN CGO_ENABLED=0 go test ./internal/... ./cmd/...
+
 RUN CGO_ENABLED=0 go build -ldflags '-s -w' -o balena-extension-runtime ./cmd/balena-extension-runtime/
 RUN ln -f balena-extension-runtime balena-extension-manager
 RUN CGO_ENABLED=0 go test -c -o integration.test ./integration/

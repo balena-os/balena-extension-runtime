@@ -13,6 +13,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// unallocatablePid sits at or above PID_MAX_LIMIT on every architecture we
+// build for: the kernel caps /proc/sys/kernel/pid_max at 4194304 on 64-bit
+// and 32768 on 32-bit, then allocates strictly below that cap. No live
+// process can carry this pid, so signalling it always fails with ESRCH.
+const unallocatablePid = 4194304
+
 // findProcess mirrors the production lookup used by Signal; it returns nil
 // for an unknown PID on Linux because os.FindProcess never errors there.
 // We probe liveness with Signal(0).
@@ -28,13 +34,7 @@ func isAlive(pid int) bool {
 // error rather than panicking — relied on by Kill's tolerance for a proxy
 // that has already exited.
 func TestSignalUnknownPID(t *testing.T) {
-	// PID 0x7fffffff is effectively never assigned; if by accident it is
-	// alive we'd see success and skip.
-	err := Signal(1<<31-1, syscall.SIGTERM)
-	if err == nil {
-		t.Skip("unlikely PID was live on this host")
-	}
-	assert.Error(t, err)
+	assert.Error(t, Signal(unallocatablePid, syscall.SIGTERM))
 }
 
 // TestNewProcessSpawnAndStop launches a short-lived subprocess standing in
