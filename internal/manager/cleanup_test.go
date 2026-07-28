@@ -6,9 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -28,60 +26,49 @@ func quietLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 }
 
-// TestCleanup_ZombieSweep_ConcurrentInFlightCreate exercises a real
-// concurrent scenario where background goroutine repeatedly flips the
-// engine's reported State.Error between empty and populated while
-// Cleanup runs in parallel, modelling a Create that may transition to
-// failed at any moment relative to Cleanup's inspect call.
-func TestCleanup_ZombieSweep_ConcurrentInFlightCreate(t *testing.T) {
+// TestCleanup_ZombieSweep_RemovesOnlyOnInspectError
+// removes a listed container on exactly the inspects that report
+// State.Error and on none of the clean ones. The stub alternates its answer,
+// standing in for a Create that has not settled yet, so the same container
+// reads failed on one sweep and clean on the next and the sweep has to
+// re-decide every run rather than latch on its first answer.
+func TestCleanup_ZombieSweep_RemovesOnlyOnInspectError(t *testing.T) {
 	stub := newEngineStub()
 	const id = "in-flight-cncr"
 	stub.Containers = []Container{
 		{ID: id, Image: "img1", State: "created", Labels: overlayLabels(nil)},
 	}
-	stub.Inspects[id] = inspectJSON(id, "created", "", 0)
+
+	const sweeps = 50
+
+	failed := inspectJSON(id, "created", "OCI runtime create failed: synthetic", 128)
+	clean := inspectJSON(id, "created", "", 0)
+	// The sweep issues exactly one inspect per listed container, so flipping
+	// on every inspect alternates the answer Cleanup sees from run to run.
+	reportFailed := false
+	stub.onInspect = func(string) string {
+		body := clean
+		if reportFailed {
+			body = failed
+		}
+		reportFailed = !reportFailed
+		return body
+	}
 
 	testEngineEnv(t, testServer(t, stub.handler()))
 
-	stop := make(chan struct{})
-	done := make(chan struct{})
-	var flips atomic.Int64
-
-	go func() {
-		defer close(done)
-		failed := inspectJSON(id, "created", "OCI runtime create failed: synthetic", 128)
-		clean := inspectJSON(id, "created", "", 0)
-		toggle := false
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			stub.mu.Lock()
-			if toggle {
-				stub.Inspects[id] = failed
-			} else {
-				stub.Inspects[id] = clean
-			}
-			stub.mu.Unlock()
-			toggle = !toggle
-			flips.Add(1)
-			time.Sleep(50 * time.Microsecond)
-		}
-	}()
-
-	for i := 0; i < 50; i++ {
+	for i := 0; i < sweeps; i++ {
 		err := Cleanup(context.Background(), quietLogger(), CleanupOpts{})
 		assert.NoError(t, err)
 	}
-	close(stop)
-	<-done
 
-	assert.Greater(t, flips.Load(), int64(50),
-		"flipper must run alongside Cleanup; bump cycles if this fails")
-
-	for _, rid := range stub.removedContainersSnapshot() {
+	// The stub keeps listing the container after each removal, so the sweep
+	// re-decides every run: the removal count pins that it acted on exactly
+	// the inspects reporting State.Error and on none of the clean ones.
+	removed := stub.removedContainersSnapshot()
+	assert.Len(t, removed, sweeps/2,
+		"sweep must remove on exactly the inspects that report State.Error")
+	for _, rid := range removed {
 		assert.Equal(t, id, rid, "only the in-flight container ID is in scope")
 	}
 }

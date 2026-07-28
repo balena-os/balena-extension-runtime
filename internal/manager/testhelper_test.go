@@ -110,8 +110,8 @@ func handleConn(conn net.Conn, handler func(string, string, []byte) (int, []byte
 }
 
 // engineStub is a mock balena-engine API for cleanup tests.
-// All fields are mu-protected so tests can mutate
-// state from a concurrent goroutine while Cleanup is running.
+// All fields are mu-protected: requests are served on the listener's
+// goroutines, not the test's.
 type engineStub struct {
 	mu                sync.Mutex
 	Containers        []Container
@@ -123,6 +123,13 @@ type engineStub struct {
 	RemovedImages     []string
 	Volumes           []Volume
 	RemovedVolumes    []string
+
+	// onInspect, when set, supplies the inspect body for id in place of the
+	// Inspects map, so a test can make consecutive inspects differ. It is
+	// called with mu held and is deliberately handed no reference to the
+	// stub: returning the body leaves it nothing to mutate, and so nothing
+	// that could re-enter the lock the handler is already holding.
+	onInspect func(id string) string
 }
 
 func newEngineStub() *engineStub {
@@ -133,9 +140,9 @@ func newEngineStub() *engineStub {
 }
 
 // handler returns a testServer handler bound to the stub's state. The
-// returned closure takes the stub's lock for every request, so concurrent
-// callers (e.g. a tweaker goroutine + Cleanup) are serialised on the
-// stub's view of the world.
+// returned closure takes the stub's lock for every request, so requests
+// arriving on separate connection goroutines are serialised on the stub's
+// view of the world.
 func (s *engineStub) handler() func(method, path string, body []byte) (int, []byte) {
 	return func(method, path string, _ []byte) (int, []byte) {
 		s.mu.Lock()
@@ -148,6 +155,9 @@ func (s *engineStub) handler() func(method, path string, body []byte) (int, []by
 			id := strings.TrimSuffix(strings.TrimPrefix(path, "/containers/"), "/json")
 			if code, ok := s.InspectStatus[id]; ok {
 				return code, []byte(`{"message":"injected"}`)
+			}
+			if s.onInspect != nil {
+				return 200, []byte(s.onInspect(id))
 			}
 			if body, ok := s.Inspects[id]; ok {
 				return 200, []byte(body)
@@ -186,8 +196,8 @@ func (s *engineStub) handler() func(method, path string, body []byte) (int, []by
 }
 
 // removedContainersSnapshot returns a copy of RemovedContainers taken
-// under the stub's lock. Use this when reading from outside a request
-// handler, e.g. after a concurrent test goroutine finishes.
+// under the stub's lock. Use this to read the record from the test
+// goroutine once the requests under test have completed.
 func (s *engineStub) removedContainersSnapshot() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
