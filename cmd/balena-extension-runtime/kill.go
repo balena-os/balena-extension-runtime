@@ -30,6 +30,11 @@ var killCmd = &cobra.Command{
 }
 
 func init() {
+	// --all is passed by containerd on the force-delete path; accepted and
+	// ignored. A container is a single proxy process spawned with Setpgid and
+	// it never forks, so it is the only member of its group.
+	killCmd.Flags().BoolP("all", "a", false,
+		"Signal all processes in the container (passed by containerd; ignored)")
 	rootCmd.AddCommand(killCmd)
 }
 

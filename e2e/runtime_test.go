@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -59,6 +60,48 @@ func runRuntime(t *testing.T, args ...string) ([]byte, error) {
 	cmd := exec.Command(runtimeBin, args...)
 	cmd.Env = append(os.Environ(), "XDG_RUNTIME_DIR="+t.TempDir())
 	return cmd.CombinedOutput()
+}
+
+// createContainer creates a container from bundle and returns its ID with the
+// pid of its proxy, asserting the proxy came up. The force-delete is registered
+// as cleanup so a failed assertion mid-test cannot leave a proxy running.
+func createContainer(t *testing.T, stateDir, bundle string) (string, int) {
+	t.Helper()
+
+	// Subtest names carry a "/", which ValidateContainerID rejects.
+	containerID := strings.ReplaceAll(t.Name(), "/", "-") +
+		"-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	pidFile := filepath.Join(t.TempDir(), "pid")
+
+	cmd := exec.Command(runtimeBin, "create", "--bundle", bundle, "--pid-file", pidFile, containerID)
+	cmd.Env = append(os.Environ(), "XDG_RUNTIME_DIR="+stateDir)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "create failed: %s", string(out))
+
+	t.Cleanup(func() {
+		cmd := exec.Command(runtimeBin, "delete", "--force", containerID)
+		cmd.Env = append(os.Environ(), "XDG_RUNTIME_DIR="+stateDir)
+		_, _ = cmd.CombinedOutput()
+	})
+
+	pidData, err := os.ReadFile(pidFile)
+	require.NoError(t, err)
+	pid, err := strconv.Atoi(string(pidData))
+	require.NoError(t, err)
+
+	require.NoError(t, syscall.Kill(pid, 0), "proxy should be alive")
+
+	return containerID, pid
+}
+
+// assertProxyGone polls instead of sleeping a fixed interval. Signal delivery
+// and process teardown are asynchronous, so any single wait is either flaky on
+// a loaded machine or longer than it needs to be.
+func assertProxyGone(t *testing.T, pid int, msg string) {
+	t.Helper()
+	assert.Eventually(t, func() bool {
+		return syscall.Kill(pid, 0) != nil
+	}, 2*time.Second, 10*time.Millisecond, msg)
 }
 
 func TestCreateStartLifecycle(t *testing.T) {
@@ -161,41 +204,35 @@ func TestKillProxy(t *testing.T) {
 		"io.balena.image.class": "overlay",
 	})
 
-	containerID := "kill-test-" + strconv.FormatInt(time.Now().UnixNano(), 36)
-	pidFile := filepath.Join(t.TempDir(), "pid")
+	containerID, pid := createContainer(t, stateDir, bundle)
 
-	// Create
-	cmd := exec.Command(runtimeBin, "create", "--bundle", bundle, "--pid-file", pidFile, containerID)
+	cmd := exec.Command(runtimeBin, "kill", containerID, "SIGTERM")
 	cmd.Env = append(os.Environ(), "XDG_RUNTIME_DIR="+stateDir)
 	out, err := cmd.CombinedOutput()
-	require.NoError(t, err, "create failed: %s", string(out))
-
-	// Read PID
-	pidData, err := os.ReadFile(pidFile)
-	require.NoError(t, err)
-	pid, err := strconv.Atoi(string(pidData))
-	require.NoError(t, err)
-
-	// Verify proxy is alive
-	require.NoError(t, syscall.Kill(pid, 0), "proxy should be alive")
-
-	// Kill
-	cmd = exec.Command(runtimeBin, "kill", containerID, "SIGTERM")
-	cmd.Env = append(os.Environ(), "XDG_RUNTIME_DIR="+stateDir)
-	out, err = cmd.CombinedOutput()
 	require.NoError(t, err, "kill failed: %s", string(out))
 
-	// Wait for process to die
-	time.Sleep(100 * time.Millisecond)
+	assertProxyGone(t, pid, "proxy should be dead after kill")
+}
 
-	// Verify proxy is dead
-	err = syscall.Kill(pid, 0)
-	assert.Error(t, err, "proxy should be dead after kill")
+// TestKillProxyAll covers the invocation containerd issues on the force-delete
+// path. Rejecting the flag made the engine return 500 on teardown and left the
+// caller retrying against a container that could never be cleaned up.
+func TestKillProxyAll(t *testing.T) {
+	stateDir := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", stateDir)
 
-	// Force delete
-	cmd = exec.Command(runtimeBin, "delete", "--force", containerID)
+	bundle := setupBundle(t, map[string]string{
+		"io.balena.image.class": "overlay",
+	})
+
+	containerID, pid := createContainer(t, stateDir, bundle)
+
+	cmd := exec.Command(runtimeBin, "kill", "--all", containerID, "9")
 	cmd.Env = append(os.Environ(), "XDG_RUNTIME_DIR="+stateDir)
-	_, _ = cmd.CombinedOutput()
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "kill --all failed: %s", string(out))
+
+	assertProxyGone(t, pid, "proxy should be dead after kill --all")
 }
 
 func TestHookExecution(t *testing.T) {
