@@ -1,4 +1,43 @@
 - commits:
+    - subject: "manager: drive the zombie sweep flip from the inspect handler"
+      hash: a9a8a5af5ebc9fa84f1fae726664cce8475066c0
+      body: |
+        Use inspect handler instead of a goroutine on a timer that was producing
+        flaky results.
+      footer:
+        Change-type: patch
+        change-type: patch
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+    - subject: "runtime: accept the kill --all flag"
+      hash: f68f12a71afa0be1c70730815c05af5088b84d6e
+      body: >
+        containerd passes --all on the force delete path.
+
+
+        The flag is ignored as a container is a single proxy process spawned
+        with
+
+        Setpgid that never forks, so it is the only member of its group;
+
+
+        Rejecting the flag made the engine return 500 on teardown, leaving
+        callers retrying
+
+        against a container that could never be cleaned up.
+      footer:
+        Change-type: patch
+        change-type: patch
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+  version: 1.2.1
+  title: ""
+  date: 2026-08-03T13:37:22.229Z
+- commits:
     - subject: "manager: read the running kernel identity from the cmdline token"
       hash: 06d76bcb450ee9e824c3be741dc30a4d6d933205
       body: |
