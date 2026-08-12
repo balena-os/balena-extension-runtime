@@ -32,7 +32,7 @@ const hookEnvPath = "/usr/sbin:/usr/bin:/sbin:/bin"
 //
 // Extension images are assumed trusted, so we do not defend against
 // symlinks under hooks/ redirecting execution to arbitrary host binaries.
-func ExecuteIfPresent(logger *slog.Logger, rootfs string, hookPath string, annotations map[string]string, specMounts []specs.Mount) error {
+func ExecuteIfPresent(ctx context.Context, logger *slog.Logger, rootfs string, hookPath string, annotations map[string]string, specMounts []specs.Mount) error {
 	if filepath.IsAbs(hookPath) {
 		return fmt.Errorf("hook path %q must be relative to rootfs", hookPath)
 	}
@@ -64,8 +64,8 @@ func ExecuteIfPresent(logger *slog.Logger, rootfs string, hookPath string, annot
 	// which can include auth tokens, TTRPC addresses, and API credentials.
 	// A hook script is extension-provided code and must not receive those.
 	// The contract is documented: hooks see PATH, EXTENSION_ROOTFS, the
-	// extension label env (labels.ToEnv), and the mount volume env
-	// (mounts.ToEnv).
+	// extension label env (labels.ToEnv) and the mount volume env
+	// (mounts.ToEnv), and nothing else.
 	env := []string{
 		"PATH=" + hookEnvPath,
 		"EXTENSION_ROOTFS=" + rootfs,
@@ -73,16 +73,19 @@ func ExecuteIfPresent(logger *slog.Logger, rootfs string, hookPath string, annot
 	env = append(env, labels.ToEnv(annotations)...)
 	env = append(env, mounts.ToEnv(specMounts)...)
 
-	ctx, cancel := context.WithTimeout(context.Background(), hookTimeout)
+	hookCtx, cancel := context.WithTimeout(ctx, hookTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, absPath)
+	cmd := exec.CommandContext(hookCtx, absPath)
 	cmd.Env = env
 	cmd.Stdout = os.Stderr // hooks log to runtime stderr
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
+		if ctx.Err() != nil {
+			return fmt.Errorf("hook %s aborted: %w", hookPath, ctx.Err())
+		}
+		if hookCtx.Err() == context.DeadlineExceeded {
 			return fmt.Errorf("hook %s timed out after %s", hookPath, hookTimeout)
 		}
 		return fmt.Errorf("hook %s failed: %w", hookPath, err)

@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -36,7 +37,7 @@ func Start(logger *slog.Logger, containerID string) error {
 		return fmt.Errorf("resolve rootfs: %w", err)
 	}
 
-	if err := hooks.ExecuteIfPresent(logger, rootfs, "hooks/start", state.Annotations, spec.Mounts); err != nil {
+	if err := hooks.ExecuteIfPresent(context.Background(), logger, rootfs, "hooks/start", state.Annotations, spec.Mounts); err != nil {
 		return err
 	}
 
