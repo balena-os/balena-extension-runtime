@@ -2,9 +2,8 @@ package main
 
 import (
 	"os"
-	"os/signal"
-	"syscall"
 
+	"github.com/balena-os/balena-extension-runtime/internal/proxy"
 	"github.com/spf13/cobra"
 )
 
@@ -18,13 +17,11 @@ var proxyCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		logger.Debug("proxy started", "container", proxyContainerID)
 
-		// Block until SIGUSR1 (start complete), SIGTERM, or SIGINT. All three
-		// mean "exit cleanly" — SIGUSR1 is how `start` signals that the
-		// extension has finished installing; SIGTERM/SIGINT are normal stops.
-		// Returning nil lets cobra/main exit with code 0.
-		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, syscall.SIGUSR1, syscall.SIGTERM, syscall.SIGINT)
-		<-sigCh
+		if status := proxy.Run(); status != 0 {
+			// The non-zero status is the message, not an error.
+			CloseLogger()
+			os.Exit(status)
+		}
 		return nil
 	},
 }

@@ -42,8 +42,9 @@ The runtime follows the standard OCI container lifecycle:
 
 1. `create` — Reads `config.json`, validates extension labels, spawns a proxy
    process, and writes OCI state
-2. `start` — Signals the proxy to exit cleanly (SIGUSR1) and transitions the
-   container to `stopped`
+2. `start` — Activates any kernel override the extension claims and signals
+   the proxy with the outcome: SIGUSR1 if the extension activated, SIGUSR2 if
+   it refused. The container transitions to `stopped` either way
 3. `kill` — Sends a signal to the proxy process
 4. `delete` — Removes runtime state
 5. `state` — Returns OCI state JSON to stdout
@@ -61,8 +62,13 @@ The runtime spawns a proxy subprocess (`balena-extension-runtime proxy`)
 during `create` to give containerd a real PID to track between `create` and
 `start`. The proxy blocks on signals:
 
-- **SIGUSR1** — "start complete", exit cleanly (container shows "Exited (0)")
+- **SIGUSR1** — activation succeeded, exit 0 (container shows "Exited (0)")
+- **SIGUSR2** — the extension refused the activation, exit 1 (container shows
+  "Exited (1)")
 - **SIGTERM/SIGINT** — killed, exit cleanly
+
+The proxy's exit status is what the engine records as the container's verdict,
+which is how a refusal reaches the caller without failing the `start` call.
 
 ### Extension labels
 

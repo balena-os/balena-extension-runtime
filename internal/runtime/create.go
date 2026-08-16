@@ -13,9 +13,8 @@ import (
 	"github.com/opencontainers/runtime-spec/specs-go"
 )
 
-// proxySpawnTimeout bounds how long we wait on the proxy spawn itself (fork +
-// exec). Once Start returns the proxy detaches and lives independently, so
-// this only guards against a wedged fork/exec — not the proxy's lifetime.
+// proxySpawnTimeout bounds the wait for the proxy to become ready for
+// signals. It does not bound the fork, the exec or the proxy's lifetime.
 const proxySpawnTimeout = 10 * time.Second
 
 // Test seams: tests override these to assert the cleanup defer is wired up
