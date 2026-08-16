@@ -54,6 +54,10 @@ func Create(ctx context.Context, logger *slog.Logger, containerID string, bundle
 		return fmt.Errorf("invalid extension: %w", err)
 	}
 
+	// A non-zero exit fails the create call instead of recording a verdict:
+	// the proxy whose exit status carries the container's outcome does not
+	// exist yet. Extensions decline activation from hooks/start, where there
+	// is a process to carry the decision.
 	if err := hooks.ExecuteIfPresent(ctx, logger, rootfs, "hooks/create", spec.Annotations, spec.Mounts); err != nil {
 		return err
 	}

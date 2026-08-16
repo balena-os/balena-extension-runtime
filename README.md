@@ -42,8 +42,9 @@ The runtime follows the standard OCI container lifecycle:
 
 1. `create` — Reads `config.json`, validates extension labels, runs the
    `hooks/create` hook, spawns a proxy process, and writes OCI state
-2. `start` — Runs the `hooks/start` hook, signals the proxy to exit cleanly
-   (SIGUSR1), and transitions the container to `stopped`
+2. `start` — Runs the `hooks/start` hook and signals the proxy with the
+   outcome: SIGUSR1 if the extension activated, SIGUSR2 if it refused. The
+   container transitions to `stopped` either way
 3. `kill` — Sends a signal to the proxy process
 4. `delete` — Runs the `hooks/delete` hook and removes runtime state
 5. `state` — Returns OCI state JSON to stdout
@@ -61,8 +62,13 @@ The runtime spawns a proxy subprocess (`balena-extension-runtime proxy`)
 during `create` to give containerd a real PID to track between `create` and
 `start`. The proxy blocks on signals:
 
-- **SIGUSR1** — "start complete", exit cleanly (container shows "Exited (0)")
+- **SIGUSR1** — activation succeeded, exit 0 (container shows "Exited (0)")
+- **SIGUSR2** — the extension refused the activation, exit 1 (container shows
+  "Exited (1)")
 - **SIGTERM/SIGINT** — killed, exit cleanly
+
+The proxy's exit status is what the engine records as the container's verdict,
+which is how a refusal reaches the caller without failing the `start` call.
 
 ### Extension labels
 
@@ -90,6 +96,16 @@ Hooks receive the following environment variables:
   underscores and uppercased (e.g., `io.balena.image.kernel-abi-id` becomes
   `EXTENSION_IMAGE_KERNEL_ABI_ID`). The forwarding is prefix-based, so custom
   or future labels are available to hooks without runtime changes.
+
+#### Where an extension declines activation
+
+`hooks/start` is the only rejection point. An extension that inspects the host
+and decides it must not activate exits non-zero there: the runtime records the
+container as `Exited (1)` and reports the `start` call as successful, so the
+caller stops rather than retrying a decision that will not change.
+
+`hooks/create` runs before the proxy process exists, so there is no container
+status to carry a verdict.
 
 ### State management
 

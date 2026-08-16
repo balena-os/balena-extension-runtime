@@ -116,6 +116,42 @@ func TestExecuteIfPresentFailure(t *testing.T) {
 	err := ExecuteIfPresent(context.Background(), testLogger, rootfs, "hooks/create", map[string]string{}, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "hook")
+	assert.ErrorIs(t, err, ErrRejected,
+		"a hook that ran and exited non-zero is the extension refusing, not the runtime failing")
+}
+
+// A hook the extension shipped without an executable bit can never run, so it
+// is the image that is wrong and a retry cannot fix it.
+func TestExecuteIfPresentNotExecutableIsRejection(t *testing.T) {
+	rootfs := t.TempDir()
+	hookDir := filepath.Join(rootfs, "hooks")
+	require.NoError(t, os.MkdirAll(hookDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(hookDir, "start"),
+		[]byte("#!/bin/sh\nexit 0\n"), 0o644))
+
+	err := ExecuteIfPresent(context.Background(), testLogger, rootfs, "hooks/start", map[string]string{}, nil)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrRejected)
+}
+
+// A hook that outlives its deadline may have been starved rather than broken.
+// Marking that a rejection would abandon an update a retry could carry.
+func TestExecuteIfPresentCancellationIsNotRejection(t *testing.T) {
+	rootfs := t.TempDir()
+	hookDir := filepath.Join(rootfs, "hooks")
+	require.NoError(t, os.MkdirAll(hookDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(hookDir, "start"),
+		[]byte("#!/bin/sh\nexec sleep 30\n"), 0o755))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+
+	err := ExecuteIfPresent(ctx, testLogger, rootfs, "hooks/start", nil, nil)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrRejected)
 }
 
 // TestExecuteIfPresentHonoursCallerCancellation pins the property a timed-out
@@ -169,6 +205,7 @@ func TestExecuteIfPresentDirectory(t *testing.T) {
 	err := ExecuteIfPresent(context.Background(), testLogger, rootfs, "hooks/create", map[string]string{}, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "directory")
+	assert.ErrorIs(t, err, ErrRejected)
 }
 
 func TestExecuteIfPresent_ExportsMountVolumeEnv(t *testing.T) {

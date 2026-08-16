@@ -62,9 +62,15 @@ func Signal(pid int, sig syscall.Signal) error {
 	return nil
 }
 
-// Start tells the proxy to proceed (SIGUSR1 → proxy exits cleanly).
+// Start tells the proxy the activation succeeded (SIGUSR1 → proxy exits 0).
 func Start(pid int) error {
 	return Signal(pid, syscall.SIGUSR1)
+}
+
+// Fail tells the proxy the extension refused its activation (SIGUSR2 → proxy
+// exits 1).
+func Fail(pid int) error {
+	return Signal(pid, syscall.SIGUSR2)
 }
 
 // Stop terminates the proxy (SIGTERM).
