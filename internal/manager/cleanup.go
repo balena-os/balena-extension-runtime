@@ -30,12 +30,12 @@ type CleanupOpts struct {
 //
 // Two container-side sweeps run unconditionally:
 //
-//   1. Zombie sweep — engine-reported failed-Create containers.
+//  1. Zombie sweep - engine-reported failed-Create containers.
 //
-//   2. Dead sweep — containers in State == "dead".
+//  2. Dead sweep - containers in State == "dead".
 //
 // When opts.PruneStaleOS is set, a third pass applies the stale-OS
-// predicate — symmetrically to containers and images — using three
+// predicate - symmetrically to containers and images - using three
 // compatibility levels, all of which must be satisfied if claimed:
 //
 //   - io.balena.image.kernel-abi-id (kernel-space ABI: symbol CRCs)
@@ -43,10 +43,17 @@ type CleanupOpts struct {
 //   - io.balena.image.os-version (OS compatibility: libc, paths, hostapp)
 //
 // Absent labels make no claim at that level. The stale-OS pass is
-// gated because it's only safe after the rollback-health commit window —
+// gated because it's only safe after the rollback-health commit window -
 // outside that window, stale containers/images are the rollback target
 // and must be preserved.
 func Cleanup(ctx context.Context, logger *slog.Logger, opts CleanupOpts) error {
+	return WithOperationLock(ctx, func() error {
+		return cleanup(ctx, logger, opts)
+	})
+}
+
+// cleanup is Cleanup's implementation, run with the operation lock held.
+func cleanup(ctx context.Context, logger *slog.Logger, opts CleanupOpts) error {
 	eng := NewEngine()
 	if err := eng.CheckSocket(); err != nil {
 		return err

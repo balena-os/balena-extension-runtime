@@ -6,11 +6,27 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 )
+
+// TestMain redirects the cross-process operation lock to a writable path for
+// the whole package. Its real home is under /run, which a test run has no
+// business creating files in and generally cannot.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "manager-lock")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "create lock directory:", err)
+		os.Exit(1)
+	}
+	lockPath = filepath.Join(dir, "operation.lock")
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
 
 // testServer starts a mock HTTP server on a Unix socket.
 // handler receives the method, path, and request body, and returns a status code and response body.
@@ -212,4 +228,3 @@ func inspectJSON(id, status, errMsg string, exitCode int) string {
 	return fmt.Sprintf(`{"Id":%q,"State":{"Status":%q,"Error":%q,"ExitCode":%d}}`,
 		id, status, errMsg, exitCode)
 }
-
