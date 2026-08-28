@@ -81,12 +81,12 @@ func (e *Engine) CheckSocket() error {
 	info, err := os.Stat(e.socket)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return fmt.Errorf("balena-engine socket not found at %s (override via DOCKER_HOST=unix:///path/to/socket)", e.socket)
+			return fmt.Errorf("%w: socket not found at %s (override via DOCKER_HOST=unix:///path/to/socket)", ErrEngineUnavailable, e.socket)
 		}
-		return fmt.Errorf("stat %s: %w", e.socket, err)
+		return fmt.Errorf("%w: stat %s: %w", ErrEngineUnavailable, e.socket, err)
 	}
 	if info.Mode()&os.ModeSocket == 0 {
-		return fmt.Errorf("%s is not a unix socket", e.socket)
+		return fmt.Errorf("%w: %s is not a unix socket", ErrEngineUnavailable, e.socket)
 	}
 	return nil
 }
@@ -105,7 +105,7 @@ func (e *Engine) do(ctx context.Context, method, path string, body []byte) ([]by
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, "unix", e.socket)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: dial %s: %w", ErrEngineUnavailable, e.socket, err)
 	}
 	defer conn.Close()
 
