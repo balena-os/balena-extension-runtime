@@ -41,15 +41,20 @@ func Create(ctx context.Context, logger *slog.Logger, containerID string, bundle
 	}
 
 	// balena-engine does not copy container labels into OCI spec annotations.
-	// Fall back to reading them from the Docker container store.
-	oci.EnrichAnnotations(logger, spec, containerID)
+	stored := oci.EnrichAnnotations(logger, spec, containerID)
 
-	if _, err := oci.ResolveRootfs(spec, bundlePath); err != nil {
+	rootfs, err := oci.ResolveRootfs(spec, bundlePath)
+	if err != nil {
 		return fmt.Errorf("resolve rootfs: %w", err)
 	}
 
 	if err := labels.Validate(spec.Annotations); err != nil {
 		return fmt.Errorf("invalid extension: %w", err)
+	}
+
+	// Fabricate before the spawn: a failure leaves no proxy.
+	if _, err := fabricateBootVolume(ctx, logger, spec, stored, rootfs, containerID); err != nil {
+		return fmt.Errorf("fabricate boot volume: %w", err)
 	}
 
 	spawnCtx, cancel := context.WithTimeout(ctx, proxySpawnTimeout)

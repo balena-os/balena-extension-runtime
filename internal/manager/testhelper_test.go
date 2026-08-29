@@ -129,16 +129,17 @@ func handleConn(conn net.Conn, handler func(string, string, []byte) (int, []byte
 // All fields are mu-protected: requests are served on the listener's
 // goroutines, not the test's.
 type engineStub struct {
-	mu                sync.Mutex
-	Containers        []Container
-	Images            []Image
-	Inspects          map[string]string
-	InspectStatus     map[string]int
-	ImagesListStatus  int
-	RemovedContainers []string
-	RemovedImages     []string
-	Volumes           []Volume
-	RemovedVolumes    []string
+	mu                    sync.Mutex
+	Containers            []Container
+	Images                []Image
+	Inspects              map[string]string
+	InspectStatus         map[string]int
+	ImagesListStatus      int
+	RemovedContainers     []string
+	RemovedImages         []string
+	Volumes               []Volume
+	RemovedVolumes        []string
+	RemoveContainerStatus map[string]int
 
 	// onInspect, when set, supplies the inspect body for id in place of the
 	// Inspects map, so a test can make consecutive inspects differ. It is
@@ -182,6 +183,9 @@ func (s *engineStub) handler() func(method, path string, body []byte) (int, []by
 		case method == "DELETE" && strings.HasPrefix(path, "/containers/"):
 			id := strings.TrimPrefix(path, "/containers/")
 			id = strings.SplitN(id, "?", 2)[0]
+			if code, ok := s.RemoveContainerStatus[id]; ok {
+				return code, []byte(`{"message":"injected"}`)
+			}
 			s.RemovedContainers = append(s.RemovedContainers, id)
 			return 204, nil
 		case method == "GET" && strings.HasPrefix(path, "/images/json"):
