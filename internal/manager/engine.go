@@ -27,25 +27,17 @@ var maxResponseBytes = 32 << 20 // 32 MiB
 
 // Container is the subset of Docker's container JSON we need.
 type Container struct {
-	ID     string            `json:"Id"`
-	Image  string            `json:"Image"`
-	State  string            `json:"State"`
-	Labels map[string]string `json:"Labels"`
-	Mounts []MountPoint      `json:"Mounts"`
-}
-
-// MountPoint is the subset of a container's mount entry we need.
-type MountPoint struct {
-	Type        string `json:"Type"`        // "volume", "bind", "tmpfs", ...
-	Source      string `json:"Source"`      // host path backing the mount
-	Destination string `json:"Destination"` // path inside the container
+	ID string `json:"Id"`
+	// ImageID is the content digest the container was created from.
+	ImageID string            `json:"ImageID"`
+	State   string            `json:"State"`
+	Labels  map[string]string `json:"Labels"`
 }
 
 // Image is the subset of Docker's image JSON we need.
 type Image struct {
-	ID       string            `json:"Id"`
-	Labels   map[string]string `json:"Labels"`
-	RepoTags []string          `json:"RepoTags"`
+	ID     string            `json:"Id"`
+	Labels map[string]string `json:"Labels"`
 }
 
 type ContainerInspect struct {
@@ -179,9 +171,23 @@ func (e *Engine) do(ctx context.Context, method, path string, body []byte) ([]by
 		return nil, fmt.Errorf("engine: %s %s: response body exceeds %d bytes", method, path, maxResponseBytes)
 	}
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("engine: %s %s: %d %s", method, path, resp.StatusCode, string(respBody))
+		return nil, &engineError{Status: resp.StatusCode, Method: method, Path: path, Body: string(respBody)}
 	}
 	return respBody, nil
+}
+
+// engineError is a response the engine refused. It carries the status code so
+// a caller can tell "no such object" from a fault without matching on the
+// message text.
+type engineError struct {
+	Status int
+	Method string
+	Path   string
+	Body   string
+}
+
+func (e *engineError) Error() string {
+	return fmt.Sprintf("engine: %s %s: %d %s", e.Method, e.Path, e.Status, e.Body)
 }
 
 // labelFilterQuery builds the url-encoded `filters` query value that the
@@ -244,8 +250,9 @@ func (e *Engine) RemoveImage(ctx context.Context, id string) error {
 }
 
 type Volume struct {
-	Name   string            `json:"Name"`
-	Labels map[string]string `json:"Labels"`
+	Name       string            `json:"Name"`
+	Mountpoint string            `json:"Mountpoint"`
+	Labels     map[string]string `json:"Labels"`
 }
 
 type volumeListResponse struct {
@@ -253,7 +260,7 @@ type volumeListResponse struct {
 }
 
 // ListVolumes returns volumes from the engine. If danglingOnly is true the
-// query is filtered to dangling=true — volumes with no container references.
+// query is filtered to dangling=true: volumes with no container references.
 func (e *Engine) ListVolumes(ctx context.Context, danglingOnly bool) ([]Volume, error) {
 	path := "/volumes"
 	if danglingOnly {
@@ -268,6 +275,36 @@ func (e *Engine) ListVolumes(ctx context.Context, danglingOnly bool) ([]Volume, 
 		return nil, fmt.Errorf("decode volume list: %w", err)
 	}
 	return resp.Volumes, nil
+}
+
+// volumeCreateRequest is the POST /volumes/create body. Labels is omitted
+// when empty so the engine is never handed a null it would have to interpret.
+type volumeCreateRequest struct {
+	Name   string            `json:"Name"`
+	Labels map[string]string `json:"Labels,omitempty"`
+}
+
+// CreateVolume creates a named volume carrying labels and returns the
+// engine's view of it, including the host path the volume is backed by.
+//
+// A name that already exists comes back as the existing volume rather
+// than a conflict.
+// Labels are only ever applied at first creation; the engine ignores
+// them for a volume that already exists.
+func (e *Engine) CreateVolume(ctx context.Context, name string, labels map[string]string) (*Volume, error) {
+	body, err := json.Marshal(volumeCreateRequest{Name: name, Labels: labels})
+	if err != nil {
+		return nil, fmt.Errorf("encode volume create: %w", err)
+	}
+	data, err := e.do(ctx, "POST", "/volumes/create", body)
+	if err != nil {
+		return nil, err
+	}
+	var v Volume
+	if err := json.Unmarshal(data, &v); err != nil {
+		return nil, fmt.Errorf("decode volume create: %w", err)
+	}
+	return &v, nil
 }
 
 // RemoveVolume deletes a named volume. Errors are propagated as-is so the

@@ -25,6 +25,9 @@ COPY --from=gobuild /src/balena-extension-manager /src/balena-extension-manager
 COPY --from=gobuild /src/integration.test /src/integration.test
 COPY --from=gobuild /src/e2e.test /src/e2e.test
 
+# The runtime dials balena-engine's socket, which is what the host OS runs.
+RUN ln -s /var/run/docker.sock /var/run/balena-engine.sock
+
 # Register extension runtime so containers created with --runtime=extension
 # go through our binary.
 RUN mkdir -p /etc/docker && \

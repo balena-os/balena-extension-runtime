@@ -158,7 +158,9 @@ func cleanup(ctx context.Context, logger *slog.Logger, opts CleanupOpts) error {
 		if err := eng.RemoveContainer(ctx, c.ID); err != nil {
 			logger.Warn("failed to remove stale container", "id", c.ID[:12], "err", err)
 			removalErrs = append(removalErrs, fmt.Errorf("remove stale container %s: %w", c.ID[:12], err))
+			continue
 		}
+		dropped[c.ID] = true
 	}
 
 	images, err := eng.ListImages(ctx, labels.Class+"="+labels.ClassOverlay)
@@ -186,11 +188,19 @@ func cleanup(ctx context.Context, logger *slog.Logger, opts CleanupOpts) error {
 	if err != nil {
 		return errors.Join(append(removalErrs, fmt.Errorf("list dangling volumes: %w", err))...)
 	}
+	claimed := claimedVolumes(containers, dropped)
 	for _, v := range vols {
 		if v.Labels[labels.Class] != labels.ClassOverlay {
 			continue
 		}
 		if !stale(logger, v.Labels, kver, abiID, osVersion) {
+			continue
+		}
+		// A fabricated volume is never attached, so it is dangling from birth
+		// and the engine's in-use protection does not cover it.
+		if claimed[v.Name] {
+			logger.Info("retaining stale extension volume, its container is still on the device",
+				"name", v.Name)
 			continue
 		}
 		logger.Info("removing stale extension volume",
@@ -204,6 +214,21 @@ func cleanup(ctx context.Context, logger *slog.Logger, opts CleanupOpts) error {
 		}
 	}
 	return errors.Join(removalErrs...)
+}
+
+// claimedVolumes returns the names of the volumes still spoken for by a
+// container this sweep left on the device, derived the same way create derived
+// them. Containers in dropped are gone, so their volumes are collectable.
+func claimedVolumes(containers []Container, dropped map[string]bool) map[string]bool {
+	claimed := make(map[string]bool)
+	for _, c := range containers {
+		if dropped[c.ID] || c.ImageID == "" || !labels.FabricatesVolume(c.Labels) {
+			continue
+		}
+		service, _ := labels.ResolveServiceName(c.Labels, c.ID)
+		claimed[labels.VolumeName(service, c.ImageID)] = true
+	}
+	return claimed
 }
 
 // stale reports whether any compatibility claim the labels declare is

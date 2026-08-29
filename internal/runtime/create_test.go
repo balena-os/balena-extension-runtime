@@ -146,3 +146,45 @@ func TestCreate_SpawnFailure_NoStopCalled(t *testing.T) {
 	assert.Empty(t, fp.stoppedPIDs,
 		"Stop must not be invoked when proxy spawn itself failed")
 }
+
+// TestCreate_FabricationFailure_NoProxySpawned asserts a kernel-claiming
+// extension that fails to fabricate its /boot volume never reaches the
+// proxy: fabrication runs before the spawn, so this failure leaves nothing
+// to clean up.
+func TestCreate_FabricationFailure_NoProxySpawned(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	fp := &fakeProxy{spawnPID: 6161}
+	fp.install(t)
+
+	// An empty store has no image id, so fabrication fails.
+	oci.SetDockerRoot(t.TempDir())
+	t.Cleanup(func() { oci.SetDockerRoot("/var/lib/docker") })
+
+	bundle := t.TempDir()
+	rootfs := filepath.Join(bundle, "rootfs")
+	require.NoError(t, os.MkdirAll(rootfs, 0o755))
+
+	annotations := map[string]string{
+		"io.balena.image.class":         "overlay",
+		"io.balena.image.kernel-abi-id": "6.6.20-test",
+		"io.balena.service-name":        "kernel-modules",
+	}
+	spec := specs.Spec{
+		Version:     specs.Version,
+		Root:        &specs.Root{Path: "rootfs"},
+		Annotations: annotations,
+	}
+	data, err := json.Marshal(spec)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(bundle, "config.json"), data, 0o644))
+
+	containerID := "fabrication-fail-test"
+	err = Create(context.Background(), testLogger(), containerID, bundle, "")
+	require.ErrorContains(t, err, "fabricate boot volume")
+
+	assert.Zero(t, fp.spawnCalls, "proxy must not be spawned when fabrication fails")
+
+	_, readErr := oci.ReadState(containerID)
+	require.Error(t, readErr, "no state should be written when fabrication fails")
+}
