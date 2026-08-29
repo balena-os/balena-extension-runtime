@@ -287,3 +287,31 @@ func TestRemoveVolume(t *testing.T) {
 	require.NoError(t, eng.RemoveVolume(context.Background(), "v1"))
 	assert.True(t, called)
 }
+
+// TestNewEngine_DockerHost pins which DOCKER_HOST values may redirect the
+// socket.
+func TestNewEngine_DockerHost(t *testing.T) {
+	tests := []struct {
+		dockerHost string
+		want       string
+	}{
+		{"", defaultSocket},
+		{"unix:///var/run/docker.sock", "/var/run/docker.sock"},
+		{"/var/run/docker.sock", "/var/run/docker.sock"},
+		{"tcp://docker:2375", defaultSocket},
+		{"npipe:////./pipe/docker_engine", defaultSocket},
+		// A scheme with nothing after it names no socket, and dialing the
+		// empty string can only fail.
+		{"unix://", defaultSocket},
+		// Relative paths resolve against whatever working directory the
+		// process happens to have, which for the runtime is containerd's.
+		{"unix://run/docker.sock", defaultSocket},
+		{"run/docker.sock", defaultSocket},
+	}
+	for _, tc := range tests {
+		t.Run(tc.dockerHost, func(t *testing.T) {
+			t.Setenv("DOCKER_HOST", tc.dockerHost)
+			assert.Equal(t, tc.want, NewEngine().socket)
+		})
+	}
+}
