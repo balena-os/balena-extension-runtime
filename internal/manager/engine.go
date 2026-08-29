@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -64,13 +65,28 @@ type Engine struct {
 }
 
 // NewEngine returns an Engine connected to the Docker socket.
-// It honours the DOCKER_HOST env var (unix:// scheme only).
+//
+// DOCKER_HOST overrides the socket, but only when it names one by absolute
+// path: either a "unix://" URL or a bare path.
 func NewEngine() *Engine {
 	sock := defaultSocket
-	if dh := os.Getenv("DOCKER_HOST"); dh != "" {
-		sock = strings.TrimPrefix(dh, "unix://")
+	if path, ok := unixSocketPath(os.Getenv("DOCKER_HOST")); ok {
+		sock = path
 	}
 	return &Engine{socket: sock}
+}
+
+// unixSocketPath returns the absolute socket path a DOCKER_HOST value names,
+// and whether it named one at all.
+func unixSocketPath(dockerHost string) (string, bool) {
+	path := dockerHost
+	if trimmed, ok := strings.CutPrefix(dockerHost, "unix://"); ok {
+		path = trimmed
+	}
+	if !filepath.IsAbs(path) {
+		return "", false
+	}
+	return path, true
 }
 
 // CheckSocket verifies the engine socket exists and is a unix socket,
