@@ -91,58 +91,92 @@ func getDockerRoot() string {
 	return dockerRoot
 }
 
-// dockerConfig is the subset of config.v2.json we need.
+// dockerConfig is the subset of config.v2.json we need. Image is the id of
+// the image the container was created from, in "sha256:<hex>" form.
 type dockerConfig struct {
+	Image  string `json:"Image"`
 	Config struct {
 		Labels map[string]string `json:"Labels"`
 	} `json:"Config"`
 }
 
+// StoredConfig is what the Docker container store records about a container
+// and the OCI spec does not carry.
+type StoredConfig struct {
+	// ImageID is the digest of the image the container was created from, in
+	// "sha256:<hex>" form, or "" when the store could not be read.
+	ImageID string
+
+	// Labels are the container's labels as the engine recorded them, which is
+	// the same map the manager's volume sweep is handed. Volume identity is
+	// derived from these rather than from spec.Annotations: in production the
+	// two are equal only because the engine sets no annotations at all, and a
+	// create that derived a volume name from a different map than the sweep
+	// re-derives it from would strand the volume.
+	Labels map[string]string
+}
+
 // EnrichAnnotations copies Docker container labels into spec.Annotations when
-// the annotations are absent. balena-engine does not propagate container labels
-// to the OCI spec annotations field, so the runtime reads them directly from
-// the Docker container store as a fallback.
+// the annotations are absent, and returns what the container store knows that
+// the spec does not. balena-engine does not propagate container labels to the
+// OCI spec annotations field, so the runtime reads them directly from the
+// Docker container store as a fallback.
 //
 // The default Docker root is /var/lib/docker; call SetDockerRoot to override.
 // containerID is the OCI container ID (same as the Docker container ID).
 //
 // This is best-effort: if the Docker config is missing or unparseable, the
-// reason is logged at debug and validation will later fail with "missing
-// required label". The debug log is what lets you diagnose that situation.
-func EnrichAnnotations(logger *slog.Logger, spec *specs.Spec, containerID string) {
-	if len(spec.Annotations) > 0 {
-		return // already populated (e.g. synthetic test bundles)
+// reason is logged at debug, the result comes back zero, and validation will
+// later fail with "missing required label". The debug log is what lets you
+// diagnose that situation.
+func EnrichAnnotations(logger *slog.Logger, spec *specs.Spec, containerID string) StoredConfig {
+	dc, ok := readDockerConfig(logger, containerID)
+	if !ok {
+		return StoredConfig{}
 	}
+	// Annotations already on the spec (a synthetic bundle, or a caller that
+	// sets them) win: they are the more specific statement of intent. The
+	// store's own view is still worth returning, so this is not an early exit.
+	if len(spec.Annotations) == 0 && len(dc.Config.Labels) > 0 {
+		spec.Annotations = make(map[string]string, len(dc.Config.Labels))
+		for k, v := range dc.Config.Labels {
+			spec.Annotations[k] = v
+		}
+	}
+	return StoredConfig{ImageID: dc.Image, Labels: dc.Config.Labels}
+}
+
+// readDockerConfig loads the container store's config.v2.json for containerID.
+// The bool reports whether the file was read and decoded; every failure is a
+// debug log rather than an error, because the caller has a usable fallback
+// for each of them.
+func readDockerConfig(logger *slog.Logger, containerID string) (dockerConfig, bool) {
+	var dc dockerConfig
 	// Validate before touching the filesystem — a crafted ID like
 	// "../../../etc" would otherwise be joined into configPath and os.Open'd
 	// against dockerRoot.
 	if err := ValidateContainerID(containerID); err != nil {
-		logger.Debug("skipping annotation enrichment: invalid container ID",
+		logger.Debug("skipping container store lookup: invalid container ID",
 			"id", containerID, "err", err)
-		return
+		return dc, false
 	}
 	configPath := filepath.Join(getDockerRoot(), "containers", containerID, "config.v2.json")
 
 	f, err := os.Open(configPath)
 	if err != nil {
-		logger.Debug("could not read docker container config for label fallback",
+		logger.Debug("could not read docker container config",
 			"path", configPath, "err", err)
-		return
+		return dc, false
 	}
 	defer func() { _ = f.Close() }()
 
-	var dc dockerConfig
 	if err := json.NewDecoder(f).Decode(&dc); err != nil {
 		logger.Debug("could not decode docker container config",
 			"path", configPath, "err", err)
-		return
+		return dc, false
 	}
 	if len(dc.Config.Labels) == 0 {
 		logger.Debug("docker container config has no labels", "path", configPath)
-		return
 	}
-	spec.Annotations = make(map[string]string, len(dc.Config.Labels))
-	for k, v := range dc.Config.Labels {
-		spec.Annotations[k] = v
-	}
+	return dc, true
 }

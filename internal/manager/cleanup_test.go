@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/balena-os/balena-extension-runtime/internal/labels"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -330,4 +331,92 @@ func TestCleanup_StaleOS_RemovesStaleExtensionVolumes(t *testing.T) {
 	}, stub.RemovedVolumes)
 	assert.NotContains(t, stub.RemovedVolumes, "ext_other_aabbccddeeff_lib_modules")
 	assert.NotContains(t, stub.RemovedVolumes, "extra-firmware")
+}
+
+// TestCleanup_StaleOS_RetainsVolumeOfSurvivingContainer covers what a
+// never-attached volume costs: it is dangling from birth, so the engine's
+// in-use protection does not hold it back and the sweep is the only thing that
+// can. Here the container's removal fails, so taking its volume would leave an
+// armed override with nothing left to disarm it.
+func TestCleanup_StaleOS_RetainsVolumeOfSurvivingContainer(t *testing.T) {
+	const id = "aaaa000000000000"
+	const imageID = "sha256:42befc76f4f8aaaa"
+
+	stub := newEngineStub()
+	stub.Containers = []Container{{
+		ID:      id,
+		ImageID: imageID,
+		State:   "exited",
+		Labels: overlayLabels(map[string]string{
+			"io.balena.image.kernel-abi-id": "6.6.20-abc",
+			"io.balena.image.os-version":    "9.9.*", // never matches running -> stale
+			"io.balena.service-name":        "kernel-modules",
+		}),
+	}}
+	stub.Inspects[id] = inspectJSON(id, "exited", "", 0)
+	// The container removal fails, so the container is still on the device
+	// when the volume sweep runs.
+	stub.RemoveContainerStatus = map[string]int{id: 500}
+
+	name := labels.VolumeName("kernel-modules", imageID)
+	stub.Volumes = []Volume{{
+		Name:   name,
+		Labels: overlayLabels(map[string]string{"io.balena.image.os-version": "9.9.*"}),
+	}}
+	testEngineEnv(t, testServer(t, stub.handler()))
+
+	osr := filepath.Join(t.TempDir(), "os-release")
+	require.NoError(t, os.WriteFile(osr, []byte(`VERSION_ID="2.119.0"`+"\n"), 0o644))
+	prev := osReleasePath
+	osReleasePath = osr
+	t.Cleanup(func() { osReleasePath = prev })
+
+	err := Cleanup(context.Background(), quietLogger(), CleanupOpts{PruneStaleOS: true})
+	require.Error(t, err, "the failed container removal must still be reported")
+
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	assert.NotContains(t, stub.RemovedVolumes, name,
+		"a volume must outlive the sweep while the container claiming it is still there")
+}
+
+// TestCleanup_StaleOS_CollectsVolumeOnceContainerIsGone is the other half:
+// nothing claims the volume after its container is removed, so the sweep takes
+// it. Without this the retention guard would simply leak every volume.
+func TestCleanup_StaleOS_CollectsVolumeOnceContainerIsGone(t *testing.T) {
+	const id = "aaaa000000000000"
+	const imageID = "sha256:42befc76f4f8aaaa"
+
+	stub := newEngineStub()
+	stub.Containers = []Container{{
+		ID:      id,
+		ImageID: imageID,
+		State:   "exited",
+		Labels: overlayLabels(map[string]string{
+			"io.balena.image.kernel-abi-id": "6.6.20-abc",
+			"io.balena.image.os-version":    "9.9.*",
+			"io.balena.service-name":        "kernel-modules",
+		}),
+	}}
+	stub.Inspects[id] = inspectJSON(id, "exited", "", 0)
+
+	name := labels.VolumeName("kernel-modules", imageID)
+	stub.Volumes = []Volume{{
+		Name:   name,
+		Labels: overlayLabels(map[string]string{"io.balena.image.os-version": "9.9.*"}),
+	}}
+	testEngineEnv(t, testServer(t, stub.handler()))
+
+	osr := filepath.Join(t.TempDir(), "os-release")
+	require.NoError(t, os.WriteFile(osr, []byte(`VERSION_ID="2.119.0"`+"\n"), 0o644))
+	prev := osReleasePath
+	osReleasePath = osr
+	t.Cleanup(func() { osReleasePath = prev })
+
+	require.NoError(t, Cleanup(context.Background(), quietLogger(), CleanupOpts{PruneStaleOS: true}))
+
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	assert.Contains(t, stub.RemovedContainers, id)
+	assert.Contains(t, stub.RemovedVolumes, name)
 }

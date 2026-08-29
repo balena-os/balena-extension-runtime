@@ -21,12 +21,63 @@ const (
 	// KernelABIID identifies the kernel's binary interface for module/eBPF compatibility. Optional.
 	KernelABIID = Prefix + "kernel-abi-id"
 
+	// ServiceName is the compose service the container was deployed from,
+	// used to name fabricated volumes.
+	ServiceName = "io.balena.service-name"
+
 	// OSVersion is the HUP-commit retention predicate for extension images.
 	// Value is a comma-separated list of shell-style globs; any match against
 	// /etc/os-release VERSION_ID retains the image. Missing/empty = retain
 	// (legacy-safe default).
 	OSVersion = Prefix + "os-version"
 )
+
+// shortIDLen is how much of a container id, and of an image digest, is worth
+// carrying.
+const shortIDLen = 12
+
+// FabricatesVolume reports whether an extension gets a /boot volume fabricated
+// for it based on the existence of kernel ABI id.
+//
+// Create and cleanup's volume sweep must agree on this, or the sweep derives
+// no name for a fabricated volume and collects it while its container is still
+// there.
+func FabricatesVolume(lbls map[string]string) bool {
+	return lbls[KernelABIID] != ""
+}
+
+// ResolveServiceName returns the service name a fabricated volume is keyed on,
+// falling back to a container id prefix for a manual deploy that carries no
+// such label.
+func ResolveServiceName(lbls map[string]string, containerID string) (string, bool) {
+	if name := lbls[ServiceName]; name != "" {
+		return name, false
+	}
+	return shortID(containerID), true
+}
+
+// VolumeName derives the name of the volume backing /boot for an extension.
+func VolumeName(service, imageID string) string {
+	return fmt.Sprintf("ext_%s_%s_boot", service, shortID(strings.TrimPrefix(imageID, "sha256:")))
+}
+
+// Image returns the io.balena.image.* subset of a label set.
+func Image(lbls map[string]string) map[string]string {
+	selected := make(map[string]string, len(lbls))
+	for k, v := range lbls {
+		if strings.HasPrefix(k, Prefix) {
+			selected[k] = v
+		}
+	}
+	return selected
+}
+
+func shortID(id string) string {
+	if len(id) > shortIDLen {
+		return id[:shortIDLen]
+	}
+	return id
+}
 
 // Validate checks that the OCI annotations contain the required extension labels.
 func Validate(annotations map[string]string) error {

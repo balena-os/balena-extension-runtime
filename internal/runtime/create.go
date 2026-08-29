@@ -42,8 +42,7 @@ func Create(ctx context.Context, logger *slog.Logger, containerID string, bundle
 	}
 
 	// balena-engine does not copy container labels into OCI spec annotations.
-	// Fall back to reading them from the Docker container store.
-	oci.EnrichAnnotations(logger, spec, containerID)
+	stored := oci.EnrichAnnotations(logger, spec, containerID)
 
 	rootfs, err := oci.ResolveRootfs(spec, bundlePath)
 	if err != nil {
@@ -54,11 +53,19 @@ func Create(ctx context.Context, logger *slog.Logger, containerID string, bundle
 		return fmt.Errorf("invalid extension: %w", err)
 	}
 
+	// Fabricate before the create hook rather than after it: the hook is
+	// what publishes the kernel out of the volume, so it has to find the
+	// volume filled.
+	bootVolume, err := fabricateBootVolume(ctx, logger, spec, stored, rootfs, containerID)
+	if err != nil {
+		return fmt.Errorf("fabricate boot volume: %w", err)
+	}
+
 	// A non-zero exit fails the create call instead of recording a verdict:
 	// the proxy whose exit status carries the container's outcome does not
 	// exist yet. Extensions decline activation from hooks/start, where there
 	// is a process to carry the decision.
-	if err := hooks.ExecuteIfPresent(ctx, logger, rootfs, "hooks/create", spec.Annotations, spec.Mounts); err != nil {
+	if err := hooks.ExecuteIfPresent(ctx, logger, rootfs, "hooks/create", spec.Annotations, withBootVolume(spec.Mounts, bootVolume)); err != nil {
 		return err
 	}
 

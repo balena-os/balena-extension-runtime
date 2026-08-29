@@ -70,9 +70,10 @@ func deadContainerStub(t *testing.T) *engineStub {
 	t.Helper()
 	stub := newEngineStub()
 	stub.Containers = []Container{{
-		ID:     deadID,
-		State:  "dead",
-		Labels: overlayLabels(nil),
+		ID:      deadID,
+		State:   "dead",
+		ImageID: "sha256:" + deadID,
+		Labels:  overlayLabels(nil),
 	}}
 	testEngineEnv(t, testServer(t, stub.handler()))
 	return stub
@@ -192,8 +193,9 @@ func TestOperationLock_NoSelfDeadlock(t *testing.T) {
 
 	stub := newEngineStub()
 	stub.Containers = []Container{{
-		ID:    id,
-		State: "exited",
+		ID:      id,
+		State:   "exited",
+		ImageID: "sha256:" + id,
 		Labels: overlayLabels(map[string]string{
 			"io.balena.image.kernel-abi-id": abi,
 			// Unsatisfiable against any real VERSION_ID, so the stale-OS

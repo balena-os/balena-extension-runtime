@@ -288,6 +288,69 @@ func TestRemoveVolume(t *testing.T) {
 	assert.True(t, called)
 }
 
+func TestCreateVolume(t *testing.T) {
+	sock := testServer(t, func(method, path string, body []byte) (int, []byte) {
+		assert.Equal(t, "POST", method)
+		assert.Equal(t, "/volumes/create", path)
+		assert.JSONEq(t, `{"Name":"ext_kernel-modules_42befc76f4f8_boot",
+			"Labels":{"io.balena.image.class":"overlay"}}`, string(body))
+		return 201, []byte(`{"Name":"ext_kernel-modules_42befc76f4f8_boot",
+			"Mountpoint":"/var/lib/docker/volumes/ext_kernel-modules_42befc76f4f8_boot/_data",
+			"Labels":{"io.balena.image.class":"overlay"}}`)
+	})
+
+	eng := testEngine(sock)
+	vol, err := eng.CreateVolume(context.Background(), "ext_kernel-modules_42befc76f4f8_boot",
+		map[string]string{"io.balena.image.class": "overlay"})
+	require.NoError(t, err)
+	assert.Equal(t, "ext_kernel-modules_42befc76f4f8_boot", vol.Name)
+	assert.Equal(t, "/var/lib/docker/volumes/ext_kernel-modules_42befc76f4f8_boot/_data", vol.Mountpoint)
+}
+
+// TestCreateVolume_ExistingVolume pins the create-or-get behaviour the
+// engine gives us: a name that already exists comes back as the existing
+// volume, with the labels it was created with rather than the ones just
+// passed. Fabrication depends on that not being a conflict.
+func TestCreateVolume_ExistingVolume(t *testing.T) {
+	sock := testServer(t, func(_, _ string, _ []byte) (int, []byte) {
+		return 201, []byte(`{"Name":"ext_svc_abc123456789_boot",
+			"Mountpoint":"/var/lib/docker/volumes/ext_svc_abc123456789_boot/_data",
+			"Labels":{"io.balena.image.class":"overlay","io.balena.image.kernel-abi-id":"original"}}`)
+	})
+
+	eng := testEngine(sock)
+	vol, err := eng.CreateVolume(context.Background(), "ext_svc_abc123456789_boot",
+		map[string]string{"io.balena.image.kernel-abi-id": "ignored"})
+	require.NoError(t, err)
+	assert.Equal(t, "/var/lib/docker/volumes/ext_svc_abc123456789_boot/_data", vol.Mountpoint)
+	assert.Equal(t, "original", vol.Labels["io.balena.image.kernel-abi-id"],
+		"labels are only applied at first creation; the existing volume keeps its own")
+}
+
+// TestCreateVolume_NoLabels asserts an empty label set is omitted from the
+// body rather than serialised as null.
+func TestCreateVolume_NoLabels(t *testing.T) {
+	sock := testServer(t, func(_, _ string, body []byte) (int, []byte) {
+		assert.JSONEq(t, `{"Name":"ext_svc_abc123456789_boot"}`, string(body))
+		return 201, []byte(`{"Name":"ext_svc_abc123456789_boot","Mountpoint":"/mnt"}`)
+	})
+
+	eng := testEngine(sock)
+	_, err := eng.CreateVolume(context.Background(), "ext_svc_abc123456789_boot", nil)
+	require.NoError(t, err)
+}
+
+func TestCreateVolume_EngineError(t *testing.T) {
+	sock := testServer(t, func(_, _ string, _ []byte) (int, []byte) {
+		return 500, []byte("volume driver failed")
+	})
+
+	eng := testEngine(sock)
+	_, err := eng.CreateVolume(context.Background(), "ext_svc_abc123456789_boot", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "volume driver failed")
+}
+
 // TestNewEngine_DockerHost pins which DOCKER_HOST values may redirect the
 // socket.
 func TestNewEngine_DockerHost(t *testing.T) {
