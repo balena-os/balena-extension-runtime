@@ -8,7 +8,11 @@ LDFLAGS := -s -w \
 	-X $(MODULE)/internal/version.Version=$(VERSION) \
 	-X $(MODULE)/internal/version.GitCommit=$(GIT_COMMIT)
 
-.PHONY: build clean test test-integration vet
+# $(BINARY) is phony rather than a file target with sources listed: go build
+# does its own staleness check, and a file target with no prerequisites is
+# never remade, which silently hands `make build && go test ./e2e/` the
+# previous binary to test.
+.PHONY: build clean test test-integration vet $(BINARY)
 
 build: $(BINARY)
 	ln -f $(BINARY) $(LINK)
