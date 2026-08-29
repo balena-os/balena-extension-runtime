@@ -2,13 +2,11 @@ package manager
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
-	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -110,16 +108,10 @@ func (e *Engine) CheckSocket() error {
 	return nil
 }
 
-// do sends an HTTP/1.1 request over the unix socket and returns the decoded
+// do sends an HTTP/1.0 request over the unix socket and returns the decoded
 // response body.
 //
-// We deliberately avoid http.Client / http.Transport: Transport's reachable
-// call graph drags crypto/tls and HTTP/2 into the binary, neither of which
-// we need for a unix-socket transport. Instead we dial directly and use
-// net/http's low-level primitives — http.Request.Write for serialising the
-// request and http.ReadResponse for parsing chunked/length-delimited
-// replies. These stay TLS-free while still giving us stdlib-grade
-// correctness for the tricky parts.
+// We deliberately avoid net/http entirely to avoid dependency creep
 func (e *Engine) do(ctx context.Context, method, path string, body []byte) ([]byte, error) {
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, "unix", e.socket)
@@ -145,33 +137,14 @@ func (e *Engine) do(ctx context.Context, method, path string, body []byte) ([]by
 	stopCancel := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stopCancel()
 
-	// Build the request. Host "localhost" is arbitrary (ignored by the
-	// engine, which only cares about the path). http.NewRequestWithContext
-	// parses the URL and rejects CRLF in the path for us.
-	var reqBody io.Reader
-	if body != nil {
-		reqBody = bytes.NewReader(body)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, "http://localhost"+path, reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-	req.Close = true
-	if body != nil {
-		req.ContentLength = int64(len(body))
-		req.Header.Set("Content-Type", "application/json")
-	}
-	if err := req.Write(conn); err != nil {
+	if err := writeRequest(conn, method, path, body); err != nil {
 		return nil, fmt.Errorf("write request: %w", err)
 	}
 
-	// http.ReadResponse decodes chunked transfer-encoding, trailers, and
-	// content-length framing for us.
-	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
+	resp, err := readResponse(bufio.NewReader(conn))
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
 	}
-	defer resp.Body.Close()
 
 	// Cap response size to avoid OOM on a buggy or malicious engine.
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxResponseBytes+1)))
