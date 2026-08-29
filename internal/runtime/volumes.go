@@ -341,6 +341,23 @@ func exists(path string) (bool, error) {
 	return false, fmt.Errorf("stat %s: %w", path, err)
 }
 
+// hookMounts returns the bundle's mounts with the volume create fabricated
+// merged in. start and delete re-read the spec from the bundle, which never
+// carried that mount, so without the merge their hooks would run without the
+// EXTENSION_VOLUME_BOOT variable the create hook was given.
+//
+// A missing or unreadable record degrades to the bundle's mounts alone rather
+// than failing the call: losing an environment variable is recoverable, and
+// refusing to delete a container is not.
+func hookMounts(logger *slog.Logger, containerID string, specMounts []specs.Mount) []specs.Mount {
+	source, err := oci.ReadBootVolume(containerID)
+	if err != nil {
+		logger.Warn("could not read the fabricated volume record, hooks run without it",
+			"id", containerID, "err", err)
+	}
+	return withBootVolume(specMounts, source)
+}
+
 // withBootVolume overlays the fabricated /boot mount onto the bundle's,
 // replacing anything the bundle declares at that destination. The runtime owns
 // /boot for a kernel override, so the hook environment carries exactly one

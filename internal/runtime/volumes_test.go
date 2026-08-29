@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -418,4 +419,105 @@ func TestWithBootVolume_ReplacesSameDestination(t *testing.T) {
 	assert.Equal(t, "/stale/boot", spec[1].Source, "the caller's slice must not be modified in place")
 
 	assert.Equal(t, spec, withBootVolume(spec, ""))
+}
+
+// TestCreateAndStart_HooksSeeFabricatedVolume is the reason create persists
+// the fabricated mount: start rebuilds its hook environment from the bundle,
+// whose config.json never carried it, so a lost record shows up as a hook
+// running without EXTENSION_VOLUME_BOOT rather than as an error.
+func TestCreateAndStart_HooksSeeFabricatedVolume(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	stub := newStubEngine(t)
+	(&fakeProxy{spawnPID: 4242}).install(t)
+	(&fakeStartProxy{}).install(t)
+
+	bundle := t.TempDir()
+	rootfs := filepath.Join(bundle, "rootfs")
+	require.NoError(t, os.MkdirAll(filepath.Join(rootfs, "boot"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(rootfs, "boot", "kernel"), []byte("vmlinuz"), 0o644))
+
+	hookDir := filepath.Join(rootfs, "hooks")
+	require.NoError(t, os.MkdirAll(hookDir, 0o755))
+	createEnv := filepath.Join(t.TempDir(), "create-env")
+	startEnv := filepath.Join(t.TempDir(), "start-env")
+	require.NoError(t, os.WriteFile(filepath.Join(hookDir, "create"),
+		[]byte("#!/bin/sh\nenv | grep EXTENSION_VOLUME_ > "+createEnv+"\n"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(hookDir, "start"),
+		[]byte("#!/bin/sh\nenv | grep EXTENSION_VOLUME_ > "+startEnv+"\n"), 0o755))
+
+	spec := specs.Spec{
+		Version:     specs.Version,
+		Root:        &specs.Root{Path: "rootfs"},
+		Annotations: kernelOverride(),
+	}
+	data, err := json.Marshal(spec)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(bundle, "config.json"), data, 0o644))
+
+	// Point the docker root at a store fixture. It carries the same labels the
+	// bundle does, which is what a real deployment looks like: the engine
+	// records them and sets no annotations at all. The volume's identity is
+	// derived from this map, not from the bundle's annotations.
+	dockerRoot := t.TempDir()
+	containerID := "0123456789abcdef"
+	configDir := filepath.Join(dockerRoot, "containers", containerID)
+	require.NoError(t, os.MkdirAll(configDir, 0o755))
+	storeLabels, err := json.Marshal(kernelOverride())
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(configDir, "config.v2.json"),
+		[]byte(`{"Image":"sha256:42befc76f4f8aaaa","Config":{"Labels":`+string(storeLabels)+`}}`), 0o644))
+	oci.SetDockerRoot(dockerRoot)
+	t.Cleanup(func() { oci.SetDockerRoot("/var/lib/docker") })
+
+	require.NoError(t, Create(context.Background(), testLogger(), containerID, bundle, ""))
+
+	mountpoint := stub.mountpoint("ext_kernel-modules_42befc76f4f8_boot")
+	assert.FileExists(t, filepath.Join(mountpoint, "kernel"))
+
+	got, err := os.ReadFile(createEnv)
+	require.NoError(t, err)
+	assert.Equal(t, "EXTENSION_VOLUME_BOOT="+mountpoint+"\n", string(got))
+
+	require.NoError(t, Start(testLogger(), containerID))
+
+	got, err = os.ReadFile(startEnv)
+	require.NoError(t, err)
+	assert.Equal(t, "EXTENSION_VOLUME_BOOT="+mountpoint+"\n", string(got),
+		"start must merge the mount create persisted")
+}
+
+// Create-or-get and the fill both happen inside the manager's operation lock.
+func TestFabricateBootVolume_FillsUnderTheOperationLock(t *testing.T) {
+	stub := newStubEngine(t)
+	rootfs := extensionRootfs(t)
+	const name = "ext_kernel-modules_42befc76f4f8_boot"
+
+	var createdInside, filledOnRelease bool
+	held := false
+
+	prevLock := withOperationLock
+	withOperationLock = func(ctx context.Context, fn func() error) error {
+		held = true
+		err := fn()
+		// A fill that ran outside the lock would not have put the kernel there yet.
+		_, statErr := os.Stat(filepath.Join(stub.mountpoint(name), "kernel"))
+		filledOnRelease = statErr == nil
+		held = false
+		return err
+	}
+	t.Cleanup(func() { withOperationLock = prevLock })
+
+	prevCreate := createVolume
+	createVolume = func(ctx context.Context, n string, l map[string]string) (*manager.Volume, error) {
+		createdInside = held
+		return prevCreate(ctx, n, l)
+	}
+	t.Cleanup(func() { createVolume = prevCreate })
+
+	_, err := fabricateBootVolume(context.Background(), testLogger(),
+		specWith(kernelOverride()), stored("sha256:42befc76f4f8aaaa"), rootfs, "0123456789abcdef")
+	require.NoError(t, err)
+
+	assert.True(t, createdInside, "create-or-get must run under the operation lock")
+	assert.True(t, filledOnRelease, "the fill must finish before the lock is released")
 }

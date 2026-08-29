@@ -2,6 +2,7 @@ package oci
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -28,8 +29,9 @@ func ValidateContainerID(id string) error {
 }
 
 const (
-	stateFileName = "state.json"
-	runtimeName   = "balena-extension-runtime"
+	stateFileName      = "state.json"
+	bootVolumeFileName = "boot-volume"
+	runtimeName        = "balena-extension-runtime"
 )
 
 var (
@@ -109,6 +111,36 @@ func ReadState(containerID string) (*specs.State, error) {
 		return nil, fmt.Errorf("failed to decode state: %w", err)
 	}
 	return &s, nil
+}
+
+// WriteBootVolume records the host path of the volume create fabricated,
+// beside the container's state so RemoveState drops it with everything else.
+func WriteBootVolume(containerID, source string) error {
+	if err := ValidateContainerID(containerID); err != nil {
+		return err
+	}
+	containerDir := filepath.Join(getStateDir(), containerID)
+	if err := os.MkdirAll(containerDir, 0o755); err != nil {
+		return fmt.Errorf("failed to create state directory: %w", err)
+	}
+	return atomicWrite(filepath.Join(containerDir, bootVolumeFileName), []byte(source))
+}
+
+// ReadBootVolume returns the host path of the volume create fabricated for a
+// container, or "" when it fabricated none. A container created before the
+// runtime fabricated anything reads the same way rather than as an error.
+func ReadBootVolume(containerID string) (string, error) {
+	if err := ValidateContainerID(containerID); err != nil {
+		return "", err
+	}
+	data, err := os.ReadFile(filepath.Join(getStateDir(), containerID, bootVolumeFileName))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil
+		}
+		return "", fmt.Errorf("failed to read fabricated volume record: %w", err)
+	}
+	return string(data), nil
 }
 
 // RemoveState deletes the state directory for a container.

@@ -96,6 +96,11 @@ func Create(ctx context.Context, logger *slog.Logger, containerID string, bundle
 	if err := oci.WriteState(state); err != nil {
 		return err
 	}
+	if bootVolume != "" {
+		if err := oci.WriteBootVolume(containerID, bootVolume); err != nil {
+			return err
+		}
+	}
 
 	if pidFile != "" {
 		if err := writePidFile(pidFile, pid); err != nil {

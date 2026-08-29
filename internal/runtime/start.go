@@ -43,7 +43,7 @@ func Start(logger *slog.Logger, containerID string) error {
 		return fmt.Errorf("resolve rootfs: %w", err)
 	}
 
-	if err := hooks.ExecuteIfPresent(context.Background(), logger, rootfs, "hooks/start", state.Annotations, spec.Mounts); err != nil {
+	if err := hooks.ExecuteIfPresent(context.Background(), logger, rootfs, "hooks/start", state.Annotations, hookMounts(logger, containerID, spec.Mounts)); err != nil {
 		if !errors.Is(err, hooks.ErrRejected) {
 			// A failure that says nothing about the extension (timeout,
 			// cancellation, unreadable rootfs): fail the start call so the
