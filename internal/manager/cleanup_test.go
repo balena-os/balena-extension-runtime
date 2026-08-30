@@ -297,42 +297,6 @@ func TestInspectContainer_ReturnsStateError(t *testing.T) {
 	assert.Equal(t, "created", got.State.Status)
 }
 
-// TestCleanup_StaleOS_RemovesStaleExtensionVolumes asserts the volume sweep
-// is ownership+staleness by label.
-func TestCleanup_StaleOS_RemovesStaleExtensionVolumes(t *testing.T) {
-	stub := newEngineStub()
-	stub.Volumes = []Volume{
-		{
-			Name:   "ext_kernel-modules_42befc76f4f8_boot",
-			Labels: overlayLabels(map[string]string{"io.balena.image.os-version": "2.118.*"}),
-		},
-		{
-			Name:   "ext_other_aabbccddeeff_lib_modules",
-			Labels: overlayLabels(map[string]string{"io.balena.image.os-version": "2.119.*"}),
-		},
-		{Name: "extra-firmware"},
-	}
-	sock := testServer(t, stub.handler())
-	testEngineEnv(t, sock)
-
-	osr := filepath.Join(t.TempDir(), "os-release")
-	require.NoError(t, os.WriteFile(osr, []byte(`VERSION_ID="2.119.0"`+"\n"), 0o644))
-	prev := osReleasePath
-	osReleasePath = osr
-	t.Cleanup(func() { osReleasePath = prev })
-
-	err := Cleanup(context.Background(), quietLogger(), CleanupOpts{PruneStaleOS: true})
-	require.NoError(t, err)
-
-	stub.mu.Lock()
-	defer stub.mu.Unlock()
-	assert.ElementsMatch(t, []string{
-		"ext_kernel-modules_42befc76f4f8_boot",
-	}, stub.RemovedVolumes)
-	assert.NotContains(t, stub.RemovedVolumes, "ext_other_aabbccddeeff_lib_modules")
-	assert.NotContains(t, stub.RemovedVolumes, "extra-firmware")
-}
-
 // TestCleanup_StaleOS_RetainsVolumeOfSurvivingContainer covers what a
 // never-attached volume costs: it is dangling from birth, so the engine's
 // in-use protection does not hold it back and the sweep is the only thing that
@@ -419,4 +383,173 @@ func TestCleanup_StaleOS_CollectsVolumeOnceContainerIsGone(t *testing.T) {
 	defer stub.mu.Unlock()
 	assert.Contains(t, stub.RemovedContainers, id)
 	assert.Contains(t, stub.RemovedVolumes, name)
+}
+
+// One walk serves both predicates, and a container the list already reports
+// dead costs no inspect round trip.
+func TestCleanup_CollectsDeadAndFailedCreateInOneWalk(t *testing.T) {
+	const deadID = "dead000000000000"
+	const zombieID = "zomb000000000000"
+	const liveID = "live000000000000"
+
+	stub := newEngineStub()
+	stub.Containers = []Container{
+		{ID: deadID, State: "dead", Labels: overlayLabels(nil)},
+		{ID: zombieID, State: "created", Labels: overlayLabels(nil)},
+		{ID: liveID, State: "exited", Labels: overlayLabels(nil)},
+	}
+	stub.Inspects[zombieID] = inspectJSON(zombieID, "created", "OCI runtime create failed: synthetic", 128)
+	stub.Inspects[liveID] = inspectJSON(liveID, "exited", "", 0)
+	testEngineEnv(t, testServer(t, stub.handler()))
+
+	require.NoError(t, Cleanup(context.Background(), quietLogger(), CleanupOpts{}))
+
+	assert.ElementsMatch(t, []string{deadID, zombieID}, stub.removedContainersSnapshot())
+	assert.NotContains(t, stub.inspectedIDsSnapshot(), deadID,
+		"a container the list already reports dead needs no inspect")
+}
+
+// Withdraw a kernel override on a device that stays on its OS and its volume is
+// never stale, so a staleness predicate never takes it.
+func TestCleanup_CollectsUnclaimedVolumeWithoutStaleOS(t *testing.T) {
+	stub := newEngineStub()
+	stub.Volumes = []Volume{
+		{
+			Name: "ext_kernel-modules_42befc76f4f8_boot",
+			// Every claim it declares still holds against the running system.
+			Labels: overlayLabels(map[string]string{"io.balena.image.os-version": "2.119.*"}),
+		},
+		{Name: "extra-firmware"},
+	}
+	testEngineEnv(t, testServer(t, stub.handler()))
+
+	require.NoError(t, Cleanup(context.Background(), quietLogger(), CleanupOpts{}))
+
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	assert.Equal(t, []string{"ext_kernel-modules_42befc76f4f8_boot"}, stub.RemovedVolumes,
+		"a plain cleanup collects an extension volume no container claims")
+	assert.NotContains(t, stub.RemovedVolumes, "extra-firmware",
+		"a volume outside the extension class is not this sweep's to take")
+}
+
+// Pins the agreement between create and the sweep: both derive the same name
+// from the same labels and image id.
+func TestCleanup_RetainsVolumeClaimedByItsOwnContainer(t *testing.T) {
+	const id = "aaaa000000000000"
+	const imageID = "sha256:42befc76f4f8aaaa"
+
+	stub := newEngineStub()
+	stub.Containers = []Container{{
+		ID:      id,
+		ImageID: imageID,
+		State:   "exited",
+		Labels: overlayLabels(map[string]string{
+			"io.balena.image.kernel-abi-id": "6.6.20-abc",
+			"io.balena.service-name":        "kernel-modules",
+		}),
+	}}
+	stub.Inspects[id] = inspectJSON(id, "exited", "", 0)
+
+	name := labels.VolumeName("kernel-modules", imageID)
+	stub.Volumes = []Volume{{Name: name, Labels: overlayLabels(nil)}}
+	testEngineEnv(t, testServer(t, stub.handler()))
+
+	require.NoError(t, Cleanup(context.Background(), quietLogger(), CleanupOpts{}))
+
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	assert.Empty(t, stub.RemovedVolumes,
+		"a volume its own container still claims must outlive the sweep")
+}
+
+// The volume sweep runs after every container pass, so a volume whose container
+// this run removed is collected now rather than at the next boot.
+func TestCleanup_CollectsVolumeFreedInTheSameSweep(t *testing.T) {
+	const id = "dddd000000000000"
+	const imageID = "sha256:42befc76f4f8aaaa"
+	name := labels.VolumeName("kernel-modules", imageID)
+
+	stub := newEngineStub()
+	stub.Containers = []Container{{
+		ID:      id,
+		ImageID: imageID,
+		State:   "dead",
+		Labels: overlayLabels(map[string]string{
+			"io.balena.image.kernel-abi-id": "6.6.20-abc",
+			"io.balena.service-name":        "kernel-modules",
+		}),
+	}}
+	stub.Volumes = []Volume{{Name: name, Labels: overlayLabels(nil)}}
+	testEngineEnv(t, testServer(t, stub.handler()))
+
+	require.NoError(t, Cleanup(context.Background(), quietLogger(), CleanupOpts{}))
+
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	assert.Contains(t, stub.RemovedContainers, id)
+	assert.Contains(t, stub.RemovedVolumes, name,
+		"the volume sweep runs after the container passes, so it sees the removal")
+}
+
+// A deploy landing between the two snapshots must find its container in the
+// claim set. The engine registers the container record before the runtime
+// fabricates the volume, so the reverse order loses the volume just adopted.
+func TestCleanup_VolumeSnapshotPrecedesTheClaimQuery(t *testing.T) {
+	const id = "bbbb000000000000"
+	const imageID = "sha256:42befc76f4f8aaaa"
+	name := labels.VolumeName("kernel-modules", imageID)
+
+	stub := newEngineStub()
+	// A redeploy of the same service and image: the volume is already on disk.
+	stub.Volumes = []Volume{{Name: name, Labels: overlayLabels(nil)}}
+	stub.deployDuringVolumeList = func() []Container {
+		return []Container{{
+			ID:      id,
+			ImageID: imageID,
+			State:   "running",
+			Labels: overlayLabels(map[string]string{
+				"io.balena.image.kernel-abi-id": "6.6.20-abc",
+				"io.balena.service-name":        "kernel-modules",
+			}),
+		}}
+	}
+	testEngineEnv(t, testServer(t, stub.handler()))
+
+	require.NoError(t, Cleanup(context.Background(), quietLogger(), CleanupOpts{}))
+
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	assert.Empty(t, stub.RemovedVolumes,
+		"a container registered before the claim query claims its volume")
+}
+
+// A claim set that cannot be completed is not an empty claim set, the rule
+// extension-rollback's forget_unclaimed_abis states for the same predicate.
+// The sweep takes nothing and the call fails.
+func TestCleanup_UnanswerableClaimQueryAbandonsTheVolumeSweep(t *testing.T) {
+	const id = "cccc000000000000"
+
+	stub := newEngineStub()
+	stub.Containers = []Container{{
+		ID: id,
+		// No ImageID, so this container's volume cannot be named.
+		State: "running",
+		Labels: overlayLabels(map[string]string{
+			"io.balena.image.kernel-abi-id": "6.6.20-abc",
+			"io.balena.service-name":        "kernel-modules",
+		}),
+	}}
+	stub.Volumes = []Volume{{
+		Name:   labels.VolumeName("kernel-modules", "sha256:42befc76f4f8aaaa"),
+		Labels: overlayLabels(nil),
+	}}
+	testEngineEnv(t, testServer(t, stub.handler()))
+
+	err := Cleanup(context.Background(), quietLogger(), CleanupOpts{})
+	require.Error(t, err, "an unanswerable claim query must fail the unit")
+
+	stub.mu.Lock()
+	defer stub.mu.Unlock()
+	assert.Empty(t, stub.RemovedVolumes, "a sweep that cannot ask must not collect")
 }

@@ -287,3 +287,52 @@ func TestCleanup_Zombie_IgnoresNonExtensionContainers(t *testing.T) {
 	assert.NotEmpty(t, out,
 		"non-extension zombie must be ignored by cleanup (class label filter)")
 }
+
+// The os-version label still matches the running system, so nothing here is
+// stale: the volume is collectable only because no container claims it.
+func TestCleanup_CollectsVolumeOfAWithdrawnKernelOverride(t *testing.T) {
+	tag := uniqueName("ext-withdrawn")
+	buildExtensionImageWithContent(t, tag,
+		map[string]string{"boot/kernel": "vmlinuz"},
+		"io.balena.image.kernel-abi-id=6.6.20-withdrawn",
+		"io.balena.image.os-version="+hostOSVersion(t))
+	defer dockerExecMayFail(t, "rmi", "-f", tag)
+
+	service := uniqueName("withdrawn")
+	id := runExtension(t, tag, service)
+	name := "ext_" + service + "_" + imageDigest12(t, id) + "_boot"
+	defer dockerExecMayFail(t, "volume", "rm", "-f", name)
+
+	// Withdrawal is a plain container removal and nothing else.
+	dockerExec(t, "rm", "-f", id)
+
+	out, err := runManager(t, "cleanup")
+	require.NoError(t, err, out)
+
+	listed := dockerExec(t, "volume", "ls", "--filter", "name="+name, "--format", "{{.Name}}")
+	assert.Empty(t, listed,
+		"a plain cleanup must collect the volume of a withdrawn kernel override")
+}
+
+// The sweep re-derives the volume name the same way create derived it, so a
+// live extension keeps its kernel.
+func TestCleanup_RetainsVolumeOfALiveKernelOverride(t *testing.T) {
+	tag := uniqueName("ext-live")
+	buildExtensionImageWithContent(t, tag,
+		map[string]string{"boot/kernel": "vmlinuz"},
+		"io.balena.image.kernel-abi-id=6.6.20-live")
+	defer dockerExecMayFail(t, "rmi", "-f", tag)
+
+	service := uniqueName("live")
+	id := runExtension(t, tag, service)
+	name := "ext_" + service + "_" + imageDigest12(t, id) + "_boot"
+	defer dockerExecMayFail(t, "volume", "rm", "-f", name)
+	defer dockerExecMayFail(t, "rm", "-f", id)
+
+	out, err := runManager(t, "cleanup")
+	require.NoError(t, err, out)
+
+	listed := dockerExec(t, "volume", "ls", "--filter", "name="+name, "--format", "{{.Name}}")
+	assert.Equal(t, name, listed,
+		"a volume its own container still claims must outlive the sweep")
+}

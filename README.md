@@ -119,24 +119,41 @@ The manager command (`balena-extension-manager`) runs outside the OCI
 lifecycle. It is invoked from HUP hooks and ad-hoc maintenance. The binary
 is a hard link to `balena-extension-runtime` and dispatches on `argv[0]`.
 
+The manager's two cleanup calls are split by what each one can reach, not by
+object type and not by update window.
+
 ### `cleanup`
 
-Removes dead extension containers. Safe to run at any time.
+Runs on every boot, with the engine up. It removes the extension containers the
+engine calls garbage (dead, or a failed runtime create) and the fabricated
+`ext_*` volumes no surviving container claims. Safe to run at any time.
 
 ```
 balena-extension-manager cleanup
 ```
 
+The volume sweep takes its snapshot of the volumes before it lists the
+containers, and that order is the whole in-use proof: everything in the sweep
+set was on disk before the claim query ran, so a deploy landing mid-sweep
+writes a volume the set does not hold. A claim query it cannot complete, a
+container that fabricates a volume but carries no image id, abandons the sweep
+and fails the call rather than collecting against a short answer.
+
 ### `cleanup --stale-os`
 
-Post-commit cleanup: removes dead containers, containers whose
-`kernel-version` or `kernel-abi-id` labels mismatch the running kernel,
-and extension images whose `io.balena.image.os-version` label doesn't
-match `/etc/os-release` `VERSION_ID`.
+Post-commit cleanup: additionally removes containers whose `kernel-version` or
+`kernel-abi-id` labels mismatch the running kernel, and extension images whose
+`io.balena.image.os-version` label doesn't match `/etc/os-release`
+`VERSION_ID`. Volumes are not in this pass.
 
-This flag is safe **only after** the HUP rollback-health commit. Outside
-that window, stale containers and images are the rollback target and
-must be preserved.
+This flag is safe **only after** the HUP rollback-health commit. Outside that
+window, a stale image is the rollback target and must be preserved.
+
+It is not the primary convergence path for containers. The device agent already
+drops a container whose claim the running kernel did not honour, at its next
+poll and with no window gating. This pass is the orphan net for extensions the
+agent cannot see: a manual deploy, or a release it no longer tracks. Images are
+the part only this pass can do.
 
 ### `os-version` label grammar
 
