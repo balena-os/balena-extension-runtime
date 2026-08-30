@@ -53,12 +53,12 @@ func ResolveServiceName(lbls map[string]string, containerID string) (string, boo
 	if name := lbls[ServiceName]; name != "" {
 		return name, false
 	}
-	return shortID(containerID), true
+	return ShortID(containerID), true
 }
 
 // VolumeName derives the name of the volume backing /boot for an extension.
 func VolumeName(service, imageID string) string {
-	return fmt.Sprintf("ext_%s_%s_boot", service, shortID(strings.TrimPrefix(imageID, "sha256:")))
+	return fmt.Sprintf("ext_%s_%s_boot", service, ShortID(strings.TrimPrefix(imageID, "sha256:")))
 }
 
 // Image returns the io.balena.image.* subset of a label set.
@@ -72,7 +72,9 @@ func Image(lbls map[string]string) map[string]string {
 	return selected
 }
 
-func shortID(id string) string {
+// ShortID trims an id to the prefix the manager's volume names and log lines
+// share. It does not assume the caller holds a full-length engine id.
+func ShortID(id string) string {
 	if len(id) > shortIDLen {
 		return id[:shortIDLen]
 	}

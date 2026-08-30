@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net"
@@ -107,7 +108,65 @@ func TestRemoveContainer(t *testing.T) {
 	})
 
 	eng := testEngine(sock)
-	require.NoError(t, eng.RemoveContainer(context.Background(), "abc123"))
+	require.NoError(t, eng.RemoveContainer(context.Background(), quietLogger(), "abc123"))
+}
+
+// A DELETE that fails and leaves the container dead is the normal outcome for
+// an extension composed into the running root: dead is the mount exclusion the
+// removal was after, so the helper reports success and says why.
+func TestRemoveContainer_DeadIsSuccess(t *testing.T) {
+	const id = "abc123"
+	stub := newEngineStub()
+	stub.RemoveContainerStatus = map[string]int{id: 500}
+	stub.Inspects[id] = inspectJSON(id, "dead", "", 0)
+	eng := testEngine(testServer(t, stub.handler()))
+
+	var buf bytes.Buffer
+	require.NoError(t, eng.RemoveContainer(context.Background(), loggerCapturing(&buf), id))
+	assert.Contains(t, buf.String(), id, "a tolerated removal has to name the container it tolerated")
+}
+
+// Any other status leaves the removal a failure, and the failure reported is
+// the removal's own: the inspect was only the question asked about it.
+func TestRemoveContainer_OtherStatusReturnsDeleteError(t *testing.T) {
+	const id = "abc123"
+	stub := newEngineStub()
+	stub.RemoveContainerStatus = map[string]int{id: 500}
+	stub.Inspects[id] = inspectJSON(id, "exited", "", 0)
+	eng := testEngine(testServer(t, stub.handler()))
+
+	err := eng.RemoveContainer(context.Background(), quietLogger(), id)
+	var engErr *engineError
+	require.ErrorAs(t, err, &engErr)
+	assert.Equal(t, "DELETE", engErr.Method)
+	assert.Equal(t, 500, engErr.Status)
+}
+
+// A failing inspect answers nothing about the removal, so the removal's error
+// stands and the inspect's is never surfaced in its place.
+func TestRemoveContainer_FailedInspectReturnsDeleteError(t *testing.T) {
+	const id = "abc123"
+	stub := newEngineStub()
+	stub.RemoveContainerStatus = map[string]int{id: 500}
+	stub.InspectStatus = map[string]int{id: 404}
+	eng := testEngine(testServer(t, stub.handler()))
+
+	err := eng.RemoveContainer(context.Background(), quietLogger(), id)
+	var engErr *engineError
+	require.ErrorAs(t, err, &engErr)
+	assert.Equal(t, "DELETE", engErr.Method)
+	assert.Equal(t, 500, engErr.Status)
+}
+
+// The tolerance costs a request, so it is only paid for on failure.
+func TestRemoveContainer_SuccessIssuesNoInspect(t *testing.T) {
+	const id = "abc123"
+	stub := newEngineStub()
+	eng := testEngine(testServer(t, stub.handler()))
+
+	require.NoError(t, eng.RemoveContainer(context.Background(), quietLogger(), id))
+	assert.Empty(t, stub.inspectedIDsSnapshot())
+	assert.Equal(t, []string{id}, stub.removedContainersSnapshot())
 }
 
 func TestListImages(t *testing.T) {

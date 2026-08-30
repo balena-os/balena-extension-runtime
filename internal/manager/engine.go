@@ -6,12 +6,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/balena-os/balena-extension-runtime/internal/labels"
 )
 
 const (
@@ -195,9 +198,25 @@ func (e *Engine) ListContainers(ctx context.Context, labelFilter string) ([]Cont
 }
 
 // RemoveContainer force-removes a container by ID.
-func (e *Engine) RemoveContainer(ctx context.Context, id string) error {
+//
+// An extension removal that leaves the container Dead is a success.
+// At that point the removal has done everything a removal of a mounted
+// extension can do. The dead sweep collects the container after a reboot
+// unpins it.
+func (e *Engine) RemoveContainer(ctx context.Context, logger *slog.Logger, id string) error {
 	_, err := e.do(ctx, "DELETE", fmt.Sprintf("/containers/%s?force=true&v=true", url.PathEscape(id)), nil)
-	return err
+	if err == nil {
+		return nil
+	}
+	ci, inspectErr := e.InspectContainer(ctx, id)
+	if inspectErr != nil || ci.State.Status != "dead" {
+		// Report the removal's own failure; the inspect was only ever a way to
+		// ask whether that failure meant anything.
+		return err
+	}
+	logger.Info("removal left the container dead; treating it as removed",
+		"id", labels.ShortID(id))
+	return nil
 }
 
 // InspectContainer returns the per-container inspect payload for ID.
