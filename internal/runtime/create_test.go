@@ -173,4 +173,3 @@ func TestCreate_HookFailure_NoProxySpawned(t *testing.T) {
 	_, readErr := oci.ReadState("good-id")
 	require.Error(t, readErr, "no state should be written when hooks/create fails")
 }
-
