@@ -2,9 +2,11 @@ package manager
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -26,6 +28,12 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 	os.RemoveAll(dir)
 	os.Exit(code)
+}
+
+// loggerCapturing writes to buf so a test can assert on what a path reports
+// when it cannot do its job.
+func loggerCapturing(buf *bytes.Buffer) *slog.Logger {
+	return slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 }
 
 // testServer starts a mock HTTP server on a Unix socket.
@@ -140,6 +148,9 @@ type engineStub struct {
 	Volumes               []Volume
 	RemovedVolumes        []string
 	RemoveContainerStatus map[string]int
+	// InspectedIDs records every container inspect the stub served, so a
+	// test can assert that a path issued none.
+	InspectedIDs []string
 
 	// onInspect, when set, supplies the inspect body for id in place of the
 	// Inspects map, so a test can make consecutive inspects differ. It is
@@ -170,6 +181,7 @@ func (s *engineStub) handler() func(method, path string, body []byte) (int, []by
 			return 200, resp
 		case method == "GET" && strings.HasPrefix(path, "/containers/") && strings.HasSuffix(path, "/json"):
 			id := strings.TrimSuffix(strings.TrimPrefix(path, "/containers/"), "/json")
+			s.InspectedIDs = append(s.InspectedIDs, id)
 			if code, ok := s.InspectStatus[id]; ok {
 				return code, []byte(`{"message":"injected"}`)
 			}
@@ -223,6 +235,16 @@ func (s *engineStub) removedContainersSnapshot() []string {
 	defer s.mu.Unlock()
 	out := make([]string, len(s.RemovedContainers))
 	copy(out, s.RemovedContainers)
+	return out
+}
+
+// inspectedIDsSnapshot returns a copy of InspectedIDs taken under the stub's
+// lock, for reading the record from the test goroutine.
+func (s *engineStub) inspectedIDsSnapshot() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, len(s.InspectedIDs))
+	copy(out, s.InspectedIDs)
 	return out
 }
 
