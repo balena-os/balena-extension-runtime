@@ -87,7 +87,7 @@ func cleanup(ctx context.Context, logger *slog.Logger, opts CleanupOpts) error {
 		}
 		logger.Info("removing failed-Create extension container",
 			"id", c.ID[:12], "state", c.State, "error", ci.State.Error, "exit-code", ci.State.ExitCode)
-		if err := eng.RemoveContainer(ctx, c.ID); err != nil {
+		if err := eng.RemoveContainer(ctx, logger, c.ID); err != nil {
 			logger.Warn("failed to remove zombie container", "id", c.ID[:12], "err", err)
 			removalErrs = append(removalErrs, fmt.Errorf("remove zombie container %s: %w", c.ID[:12], err))
 			continue
@@ -104,7 +104,7 @@ func cleanup(ctx context.Context, logger *slog.Logger, opts CleanupOpts) error {
 			continue
 		}
 		logger.Info("removing dead extension container", "id", c.ID[:12])
-		if err := eng.RemoveContainer(ctx, c.ID); err != nil {
+		if err := eng.RemoveContainer(ctx, logger, c.ID); err != nil {
 			logger.Warn("failed to remove dead container", "id", c.ID[:12], "err", err)
 			removalErrs = append(removalErrs, fmt.Errorf("remove dead container %s: %w", c.ID[:12], err))
 			continue
@@ -155,7 +155,7 @@ func cleanup(ctx context.Context, logger *slog.Logger, opts CleanupOpts) error {
 			"kernel-abi-id", c.Labels[labels.KernelABIID],
 			"os-version", c.Labels[labels.OSVersion],
 		)
-		if err := eng.RemoveContainer(ctx, c.ID); err != nil {
+		if err := eng.RemoveContainer(ctx, logger, c.ID); err != nil {
 			logger.Warn("failed to remove stale container", "id", c.ID[:12], "err", err)
 			removalErrs = append(removalErrs, fmt.Errorf("remove stale container %s: %w", c.ID[:12], err))
 			continue
