@@ -158,6 +158,11 @@ type engineStub struct {
 	// stub: returning the body leaves it nothing to mutate, and so nothing
 	// that could re-enter the lock the handler is already holding.
 	onInspect func(id string) string
+
+	// deployDuringVolumeList stands in for a deploy landing between the sweep's
+	// two snapshots. Like onInspect it is handed no reference to the stub, so it
+	// cannot re-enter the lock the handler already holds.
+	deployDuringVolumeList func() []Container
 }
 
 func newEngineStub() *engineStub {
@@ -215,6 +220,10 @@ func (s *engineStub) handler() func(method, path string, body []byte) (int, []by
 			resp, _ := json.Marshal(struct {
 				Volumes []Volume `json:"Volumes"`
 			}{Volumes: s.Volumes})
+			if s.deployDuringVolumeList != nil {
+				s.Containers = append(s.Containers, s.deployDuringVolumeList()...)
+				s.deployDuringVolumeList = nil
+			}
 			return 200, resp
 		case method == "DELETE" && strings.HasPrefix(path, "/volumes/"):
 			name := strings.TrimPrefix(path, "/volumes/")
