@@ -16,16 +16,17 @@ import (
 
 var startTestLogger = slog.New(slog.NewTextHandler(os.Stderr, nil))
 
-// fakeStartProxy swaps the start/fail signal seams and records which one
+// fakeStartProxy swaps the start/fail/stop signal seams and records which one
 // fired, so the routing decision can be asserted without a live proxy.
 type fakeStartProxy struct {
 	started []int
 	failed  []int
+	stopped []int
 }
 
 func (f *fakeStartProxy) install(t *testing.T) {
 	t.Helper()
-	prevStart, prevFail := proxyStart, proxyFail
+	prevStart, prevFail, prevStop := proxyStart, proxyFail, proxyStop
 	proxyStart = func(pid int) error {
 		f.started = append(f.started, pid)
 		return nil
@@ -34,9 +35,14 @@ func (f *fakeStartProxy) install(t *testing.T) {
 		f.failed = append(f.failed, pid)
 		return nil
 	}
+	proxyStop = func(pid int) error {
+		f.stopped = append(f.stopped, pid)
+		return nil
+	}
 	t.Cleanup(func() {
 		proxyStart = prevStart
 		proxyFail = prevFail
+		proxyStop = prevStop
 	})
 }
 
@@ -102,6 +108,8 @@ func TestStart_RuntimeFailureStillFailsTheStartCall(t *testing.T) {
 
 	assert.Empty(t, fake.started)
 	assert.Empty(t, fake.failed)
+	assert.Equal(t, []int{12345}, fake.stopped,
+		"the proxy must not outlive the attempt that spawned it")
 
 	state, err := oci.ReadState(containerID)
 	require.NoError(t, err)
@@ -173,6 +181,7 @@ func TestStart_RetryableActivationFailsTheCall(t *testing.T) {
 
 	assert.Empty(t, fake.failed, "a machine condition is not a verdict")
 	assert.Empty(t, fake.started)
+	assert.Equal(t, []int{12345}, fake.stopped, "the proxy must not be left behind")
 }
 
 // An image defect is a verdict even when the state mount raced.
