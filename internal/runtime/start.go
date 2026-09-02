@@ -35,12 +35,12 @@ func Start(logger *slog.Logger, containerID string) error {
 
 	spec, err := oci.ReadSpec(state.Bundle)
 	if err != nil {
-		return fmt.Errorf("failed to read spec: %w", err)
+		return abortStart(logger, state, fmt.Errorf("failed to read spec: %w", err))
 	}
 
 	rootfs, err := oci.ResolveRootfs(spec, state.Bundle)
 	if err != nil {
-		return fmt.Errorf("resolve rootfs: %w", err)
+		return abortStart(logger, state, fmt.Errorf("resolve rootfs: %w", err))
 	}
 
 	if err := hooks.ExecuteIfPresent(context.Background(), logger, rootfs, "hooks/start", state.Annotations, hookMounts(logger, containerID, spec.Mounts)); err != nil {
@@ -48,7 +48,7 @@ func Start(logger *slog.Logger, containerID string) error {
 			// A failure that says nothing about the extension (timeout,
 			// cancellation, unreadable rootfs): fail the start call so the
 			// container stays created and the caller can retry it.
-			return err
+			return abortStart(logger, state, err)
 		}
 		// The extension itself refused the activation.
 		logger.Error("extension refused activation", "id", containerID, "err", err.Error())
@@ -56,6 +56,21 @@ func Start(logger *slog.Logger, containerID string) error {
 	}
 
 	return stopContainer(logger, state, containerID, proxyStart, "Exited (0)")
+}
+
+// abortStart terminates the proxy and returns the error that failed the start.
+//
+// A cleanup failure is logged, not returned. The caller is owed the error that
+// failed the start, not this one.
+func abortStart(logger *slog.Logger, state *specs.State, cause error) error {
+	if err := proxyStop(state.Pid); err != nil {
+		if errors.Is(err, os.ErrProcessDone) || errors.Is(err, syscall.ESRCH) {
+			logger.Info("proxy already exited before the start failed", "pid", state.Pid)
+		} else {
+			logger.Error("failed to stop proxy", "pid", state.Pid, "error", err)
+		}
+	}
+	return cause
 }
 
 // stopContainer records the container's terminal state and signals the proxy
