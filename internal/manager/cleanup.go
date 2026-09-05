@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/balena-os/balena-extension-runtime/internal/labels"
+	"github.com/balena-os/hostapp"
 )
 
 // osReleasePath is the default path to /etc/os-release. Overridable in tests.
@@ -344,16 +345,5 @@ func runningKernelABIID() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("read /proc/cmdline: %w", err)
 	}
-	return parseKernelABIID(string(data)), nil
-}
-
-// parseKernelABIID extracts the balena_kernel_abi token value from a kernel
-// command line, or "" when absent.
-func parseKernelABIID(cmdline string) string {
-	for _, tok := range strings.Fields(cmdline) {
-		if v, ok := strings.CutPrefix(tok, "balena_kernel_abi="); ok {
-			return v
-		}
-	}
-	return ""
+	return hostapp.ParseHostKernelABIID(string(data)), nil
 }
