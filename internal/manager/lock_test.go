@@ -30,8 +30,7 @@ func TestOperationLock_SerializesConcurrentCallers(t *testing.T) {
 				break
 			}
 		}
-		// Long enough that eight goroutines firing at once would need real
-		// overlap to finish in anything close to one sleep's worth of time.
+		// Long enough that overlap would show in the timing.
 		time.Sleep(30 * time.Millisecond)
 		return base(method, path, body)
 	}
@@ -53,8 +52,7 @@ func TestOperationLock_SerializesConcurrentCallers(t *testing.T) {
 
 	assert.Equal(t, int32(1), atomic.LoadInt32(&maxObserved),
 		"the operation lock must keep two callers' engine calls from overlapping")
-	// Belt and braces on the same property from the outside: fully
-	// serialized, runs requests can't finish faster than runs sleeps.
+	// The same property from outside: runs requests, runs sleeps.
 	assert.GreaterOrEqual(t, elapsed, time.Duration(runs)*30*time.Millisecond,
 		"serialized callers must not complete faster than one sleep each")
 }
@@ -101,8 +99,8 @@ func holdFileLock(t *testing.T) func() {
 }
 
 // TestOperationLock_WaitsForAnotherHolderOfTheFileLock covers what the
-// in-process mutex cannot: the boot cleanup unit and the rollback shell's
-// removal run in separate processes, so only the file lock keeps them apart.
+// in-process mutex cannot: the engine execs the runtime as its own process,
+// so only the file lock keeps it apart from a sweeping manager.
 func TestOperationLock_WaitsForAnotherHolderOfTheFileLock(t *testing.T) {
 	stub := deadContainerStub(t)
 	release := holdFileLock(t)
@@ -140,8 +138,7 @@ func TestOperationLock_CancelledWhileWaitingDoesNotRun(t *testing.T) {
 	stub := deadContainerStub(t)
 	holdFileLock(t)
 
-	// The deadline outlives at least one poll, so the operation is cancelled
-	// mid-wait rather than before it ever reaches the lock.
+	// Outlives one poll, so the cancel lands mid-wait.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*lockPollInterval)
 	defer cancel()
 
@@ -168,8 +165,7 @@ func TestOperationLock_DoesNotRunWithADoneContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	// Repeated because the select over a ready ctx and a free lock picks
-	// pseudo-randomly, so one pass would miss the defect about half the time.
+	// Repeated: the select over a ready ctx picks pseudo-randomly.
 	ran := 0
 	for range 50 {
 		err := WithOperationLock(ctx, func() error {
@@ -197,8 +193,7 @@ func TestOperationLock_NoSelfDeadlock(t *testing.T) {
 		ImageID: "sha256:" + id,
 		Labels: overlayLabels(map[string]string{
 			"io.balena.image.kernel-abi-id": abi,
-			// Unsatisfiable against the running system the test sets, so
-			// the stale-OS pass reaches the removal.
+			// Unsatisfiable, so the stale-OS pass reaches the removal.
 			"io.balena.image.os-version": "9.9.*",
 		}),
 	}}
