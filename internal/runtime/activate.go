@@ -1,7 +1,6 @@
 package runtime
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -14,21 +13,8 @@ import (
 	"github.com/balena-os/balena-extension-runtime/internal/labels"
 	"github.com/balena-os/balena-extension-runtime/internal/mounts"
 	"github.com/balena-os/balena-extension-runtime/internal/oci"
+	"github.com/balena-os/balena-extension-runtime/internal/override"
 	"github.com/balena-os/hostapp"
-)
-
-// The host paths activation touches, with internal/bootenv the whole host
-// contract. Variables so tests can redirect them.
-var (
-	// One link per published kernel, read by the initramfs.
-	bootByABIDir = "/mnt/data/boot-by-abi"
-
-	// Carries the validator's records across a boot.
-	stateMount = "/mnt/state"
-
-	// The VPN reachability the validator compares against. openvpn's
-	// upscript and rollback-tests both spell it /run.
-	vpnActiveMarker = "/run/openvpn/vpn_status/active"
 )
 
 // Where the data partition carries the engine's volumes.
@@ -42,10 +28,8 @@ var (
 )
 
 // activate installs and arms a kernel override. An extension carrying no
-// kernel activates nothing.
-//
-// A hooks.ErrRejected is the extension's verdict and no retry changes it.
-// Any other error is a machine condition the caller can retry.
+// kernel activates nothing, and a hooks.ErrRejected is the extension's
+// verdict rather than a machine condition.
 //
 // The step order below is the safety argument; nothing else enforces it.
 func activate(logger *slog.Logger, containerID, rootfs string, annotations map[string]string) error {
@@ -54,15 +38,17 @@ func activate(logger *slog.Logger, containerID, rootfs string, annotations map[s
 	}
 	abi := annotations[labels.KernelABIID]
 
-	mounted, err := isMounted(stateMount)
+	mounted, err := isMounted(override.StateMount)
 	if err != nil {
-		return fmt.Errorf("checking whether %s is mounted: %w", stateMount, err)
+		return fmt.Errorf("checking whether %s is mounted: %w", override.StateMount, err)
 	}
 	if !mounted {
-		return fmt.Errorf("%s is not mounted, refusing to arm %s", stateMount, abi)
+		return fmt.Errorf("%s is not mounted, refusing to arm %s", override.StateMount, abi)
 	}
 
-	listed, err := rejectedABI(abi)
+	// A plain error from here is a machine condition; the record itself is
+	// the extension's verdict.
+	listed, err := override.RejectedABI(abi)
 	if err != nil {
 		return err
 	}
@@ -119,10 +105,10 @@ func activate(logger *slog.Logger, containerID, rootfs string, annotations map[s
 		return err
 	}
 
-	if err := publishKernel(abi, target); err != nil {
+	if err := override.PublishKernel(abi, target); err != nil {
 		return err
 	}
-	if err := writeHealthPrestate(); err != nil {
+	if err := override.WriteHealthPrestate(); err != nil {
 		return err
 	}
 	if err := armOverride(abi); err != nil {
@@ -159,31 +145,6 @@ func hasModuleSymvers(rootfs string) (bool, error) {
 	return false, nil
 }
 
-// rejectedABI reports whether boot-time validation already rejected this
-// kernel. An absent record is empty; an unreadable one is a machine condition.
-func rejectedABI(abi string) (bool, error) {
-	path := filepath.Join(stateMount, "override-rejected")
-	f, err := os.Open(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return false, nil
-		}
-		return false, fmt.Errorf("read %s: %w", path, err)
-	}
-	defer func() { _ = f.Close() }()
-
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		if scanner.Text() == abi {
-			return true, nil
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return false, fmt.Errorf("read %s: %w", path, err)
-	}
-	return false, nil
-}
-
 // volumeTarget returns the link target for a fabricated volume's kernel,
 // relative to the data partition.
 //
@@ -202,71 +163,4 @@ func volumeTarget(mountpoint, kernel string) (string, error) {
 		return "", fmt.Errorf("kernel image name %q is not a bare file name", kernel)
 	}
 	return filepath.Join("..", dataVolumes, name, "_data", kernel), nil
-}
-
-// publishKernel points boot-by-abi/<abi> at the kernel image itself, so that
-// the link resolving is the same question as the kernel being there.
-// A republish overwrites, because a retry is a recreate.
-func publishKernel(abi, target string) error {
-	if err := os.MkdirAll(bootByABIDir, 0o755); err != nil {
-		return fmt.Errorf("create %s: %w", bootByABIDir, err)
-	}
-	tmp := filepath.Join(bootByABIDir, abi+".new")
-	if err := os.Remove(tmp); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("clear %s: %w", tmp, err)
-	}
-	if err := os.Symlink(target, tmp); err != nil {
-		return fmt.Errorf("link %s: %w", tmp, err)
-	}
-	link := filepath.Join(bootByABIDir, abi)
-	if err := os.Rename(tmp, link); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("publish %s: %w", link, err)
-	}
-	// Durable before anything else names the ABI.
-	return syncDir(bootByABIDir)
-}
-
-// writeHealthPrestate records VPN reachability for the next boot's validator.
-//
-// Written through a temporary name: extension-rollback removes this file when
-// it closes a window, so its presence is what says a window is open. A
-// truncating write would leave an open window reading an empty prestate.
-func writeHealthPrestate() error {
-	value := "BALENAOS_ROLLBACK_VPNONLINE=0\n"
-	if _, err := os.Stat(vpnActiveMarker); err == nil {
-		value = "BALENAOS_ROLLBACK_VPNONLINE=1\n"
-	}
-	path := filepath.Join(stateMount, "extension-health-variables")
-	tmp := path + ".new"
-	if err := writeFileSynced(tmp, value); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("publish %s: %w", path, err)
-	}
-	// A new name needs its directory entry on disk.
-	return syncDir(stateMount)
-}
-
-// writeFileSynced writes content to path and fsyncs it before returning.
-func writeFileSynced(path, content string) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
-	if err != nil {
-		return fmt.Errorf("open %s: %w", path, err)
-	}
-	if _, err := f.WriteString(content); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("write %s: %w", path, err)
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("sync %s: %w", path, err)
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("close %s: %w", path, err)
-	}
-	return nil
 }

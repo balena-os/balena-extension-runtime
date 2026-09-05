@@ -11,6 +11,7 @@ import (
 	"github.com/balena-os/balena-extension-runtime/internal/hooks"
 	"github.com/balena-os/balena-extension-runtime/internal/labels"
 	"github.com/balena-os/balena-extension-runtime/internal/oci"
+	"github.com/balena-os/balena-extension-runtime/internal/override"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -24,19 +25,19 @@ func activateHost(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
 
-	prevBootByABI, prevState, prevVPN := bootByABIDir, stateMount, vpnActiveMarker
+	prevBootByABI, prevState, prevVPN := override.BootByABIDir, override.StateMount, override.VPNActiveMarker
 	prevMounted, prevArm := isMounted, armOverride
 
-	bootByABIDir = filepath.Join(root, "mnt", "data", "boot-by-abi")
-	stateMount = filepath.Join(root, "mnt", "state")
-	vpnActiveMarker = filepath.Join(root, "run", "openvpn", "active")
+	override.BootByABIDir = filepath.Join(root, "mnt", "data", "boot-by-abi")
+	override.StateMount = filepath.Join(root, "mnt", "state")
+	override.VPNActiveMarker = filepath.Join(root, "run", "openvpn", "active")
 	isMounted = func(string) (bool, error) { return true, nil }
 	armOverride = func(string) error { return nil }
 
-	require.NoError(t, os.MkdirAll(stateMount, 0o755))
+	require.NoError(t, os.MkdirAll(override.StateMount, 0o755))
 
 	t.Cleanup(func() {
-		bootByABIDir, stateMount, vpnActiveMarker = prevBootByABI, prevState, prevVPN
+		override.BootByABIDir, override.StateMount, override.VPNActiveMarker = prevBootByABI, prevState, prevVPN
 		isMounted, armOverride = prevMounted, prevArm
 	})
 	return root
@@ -79,7 +80,7 @@ func TestActivate_NoLabelDoesNothing(t *testing.T) {
 		labels.Class: labels.ClassOverlay,
 	}))
 
-	_, err := os.Stat(bootByABIDir)
+	_, err := os.Stat(override.BootByABIDir)
 	assert.ErrorIs(t, err, os.ErrNotExist, "a userspace extension publishes nothing")
 }
 
@@ -209,7 +210,7 @@ func TestActivate_RejectedABIIsDeclined(t *testing.T) {
 	root := activateHost(t)
 	rootfs, abi := activateRootfs(t, root, "kernel")
 	fabricatedVolume(t, root, "c1", "ext_test_abc_boot")
-	require.NoError(t, os.WriteFile(filepath.Join(stateMount, "override-rejected"),
+	require.NoError(t, os.WriteFile(filepath.Join(override.StateMount, "override-rejected"),
 		[]byte("1111111111111111111111111111111111111111111111111111111111111111\n"+abi+"\n"), 0o644))
 
 	err := activate(activateTestLogger, "c1", rootfs, map[string]string{
@@ -240,7 +241,7 @@ func TestActivate_UnmountedStateIsRetryable(t *testing.T) {
 func TestActivate_UnreadableRejectionRecordIsRetryable(t *testing.T) {
 	root := activateHost(t)
 	rootfs, abi := activateRootfs(t, root, "kernel")
-	require.NoError(t, os.Mkdir(filepath.Join(stateMount, "override-rejected"), 0o755))
+	require.NoError(t, os.Mkdir(filepath.Join(override.StateMount, "override-rejected"), 0o755))
 
 	err := activate(activateTestLogger, "c1", rootfs, map[string]string{
 		labels.Class:       labels.ClassOverlay,
@@ -301,17 +302,17 @@ func TestActivate_PublishesArmsAndRecordsThePrestate(t *testing.T) {
 
 	// The link is relative to the data partition, not to the engine's data
 	// root, so it resolves the same way in the initramfs.
-	target, err := os.Readlink(filepath.Join(bootByABIDir, abi))
+	target, err := os.Readlink(filepath.Join(override.BootByABIDir, abi))
 	require.NoError(t, err)
 	assert.Equal(t, "../docker/volumes/ext_test_abc_boot/_data/Image", target)
 
-	prestate, err := os.ReadFile(filepath.Join(stateMount, "extension-health-variables"))
+	prestate, err := os.ReadFile(filepath.Join(override.StateMount, "extension-health-variables"))
 	require.NoError(t, err)
 	assert.Equal(t, "BALENAOS_ROLLBACK_VPNONLINE=0\n", string(prestate))
 
 	assert.Equal(t, []string{abi}, armed)
 
-	entries, err := os.ReadDir(bootByABIDir)
+	entries, err := os.ReadDir(override.BootByABIDir)
 	require.NoError(t, err)
 	require.Len(t, entries, 1, "the temporary name must not survive")
 	assert.Equal(t, abi, entries[0].Name())
@@ -326,12 +327,12 @@ func TestActivate_PrestateIsPublishedWhole(t *testing.T) {
 	rootfs, abi := activateRootfs(t, root, "kernel")
 	fabricatedVolume(t, root, "c1", "ext_test_abc_boot")
 
-	path := filepath.Join(stateMount, "extension-health-variables")
+	path := filepath.Join(override.StateMount, "extension-health-variables")
 	require.NoError(t, os.WriteFile(path, []byte("BALENAOS_ROLLBACK_VPNONLINE=1\n"), 0o644))
 
 	// The rename is the only thing that may touch the published name.
 	armOverride = func(string) error {
-		entries, err := os.ReadDir(stateMount)
+		entries, err := os.ReadDir(override.StateMount)
 		require.NoError(t, err)
 		for _, e := range entries {
 			assert.NotContains(t, e.Name(), ".new", "the temporary name must not survive")
@@ -354,15 +355,15 @@ func TestActivate_RecordsAReachableVPN(t *testing.T) {
 	root := activateHost(t)
 	rootfs, abi := activateRootfs(t, root, "kernel")
 	fabricatedVolume(t, root, "c1", "ext_test_abc_boot")
-	require.NoError(t, os.MkdirAll(filepath.Dir(vpnActiveMarker), 0o755))
-	require.NoError(t, os.WriteFile(vpnActiveMarker, nil, 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Dir(override.VPNActiveMarker), 0o755))
+	require.NoError(t, os.WriteFile(override.VPNActiveMarker, nil, 0o644))
 
 	require.NoError(t, activate(activateTestLogger, "c1", rootfs, map[string]string{
 		labels.Class:       labels.ClassOverlay,
 		labels.KernelABIID: abi,
 	}))
 
-	prestate, err := os.ReadFile(filepath.Join(stateMount, "extension-health-variables"))
+	prestate, err := os.ReadFile(filepath.Join(override.StateMount, "extension-health-variables"))
 	require.NoError(t, err)
 	assert.Equal(t, "BALENAOS_ROLLBACK_VPNONLINE=1\n", string(prestate))
 }
@@ -382,7 +383,7 @@ func TestActivate_RepublishIsIdempotent(t *testing.T) {
 	require.NoError(t, activate(activateTestLogger, "c1", rootfs, annotations))
 	require.NoError(t, activate(activateTestLogger, "c1", rootfs, annotations))
 
-	target, err := os.Readlink(filepath.Join(bootByABIDir, abi))
+	target, err := os.Readlink(filepath.Join(override.BootByABIDir, abi))
 	require.NoError(t, err)
 	assert.Equal(t, "../docker/volumes/ext_test_abc_boot/_data/Image", target)
 }
@@ -398,9 +399,9 @@ func TestActivate_ArmComesLast(t *testing.T) {
 
 	var linkAtArm, prestateAtArm bool
 	armOverride = func(string) error {
-		_, err := os.Lstat(filepath.Join(bootByABIDir, abi))
+		_, err := os.Lstat(filepath.Join(override.BootByABIDir, abi))
 		linkAtArm = err == nil
-		_, err = os.Stat(filepath.Join(stateMount, "extension-health-variables"))
+		_, err = os.Stat(filepath.Join(override.StateMount, "extension-health-variables"))
 		prestateAtArm = err == nil
 		return assert.AnError
 	}
@@ -435,9 +436,9 @@ func TestActivate_DeclinedExtensionWritesNothing(t *testing.T) {
 	})
 	require.ErrorIs(t, err, hooks.ErrRejected)
 
-	_, statErr := os.Stat(bootByABIDir)
+	_, statErr := os.Stat(override.BootByABIDir)
 	assert.ErrorIs(t, statErr, os.ErrNotExist)
-	_, statErr = os.Stat(filepath.Join(stateMount, "extension-health-variables"))
+	_, statErr = os.Stat(filepath.Join(override.StateMount, "extension-health-variables"))
 	assert.ErrorIs(t, statErr, os.ErrNotExist)
 	assert.Zero(t, armed)
 }

@@ -9,6 +9,7 @@ import (
 
 	"github.com/balena-os/balena-extension-runtime/internal/labels"
 	"github.com/balena-os/balena-extension-runtime/internal/oci"
+	"github.com/balena-os/balena-extension-runtime/internal/override"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -192,7 +193,7 @@ func TestStart_DecliningHookRunsBeforeActivation(t *testing.T) {
 
 	assert.Equal(t, []int{12345}, fake.failed, "the hook's verdict is the container's")
 	assert.Zero(t, armed, "a declining hook must stop activation")
-	_, err := os.Stat(bootByABIDir)
+	_, err := os.Stat(override.BootByABIDir)
 	assert.ErrorIs(t, err, os.ErrNotExist, "a declining hook must leave no link")
 }
 
