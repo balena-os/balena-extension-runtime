@@ -27,8 +27,9 @@ const hookTimeout = 60 * time.Second
 // environment could influence execution.
 const hookEnvPath = "/usr/sbin:/usr/bin:/sbin:/bin"
 
-// ErrRejected marks a hook failure that belongs to the extension image rather
-// than to the runtime or the machine it runs on.
+// ErrRejected marks a failure that belongs to the extension image rather than
+// to the runtime or the machine it runs on: a hook that exited non-zero, or
+// an activation the image cannot pass however often it is retried.
 var ErrRejected = errors.New("activation rejected by extension")
 
 // ExecuteIfPresent runs a hook script from the extension rootfs if it exists.

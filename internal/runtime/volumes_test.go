@@ -427,6 +427,9 @@ func TestWithBootVolume_ReplacesSameDestination(t *testing.T) {
 // running without EXTENSION_VOLUME_BOOT rather than as an error.
 func TestCreateAndStart_HooksSeeFabricatedVolume(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	// Start activates, and this extension claims an ABI. Redirect the host
+	// paths so the test never reaches the real state and boot partitions.
+	activateHost(t)
 	stub := newStubEngine(t)
 	(&fakeProxy{spawnPID: 4242}).install(t)
 	(&fakeStartProxy{}).install(t)

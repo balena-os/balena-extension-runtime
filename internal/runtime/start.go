@@ -43,14 +43,17 @@ func Start(logger *slog.Logger, containerID string) error {
 		return abortStart(logger, state, fmt.Errorf("resolve rootfs: %w", err))
 	}
 
-	if err := hooks.ExecuteIfPresent(context.Background(), logger, rootfs, "hooks/start", state.Annotations, hookMounts(logger, containerID, spec.Mounts)); err != nil {
+	// The arm must be the last step that declines.
+	err = hooks.ExecuteIfPresent(context.Background(), logger, rootfs, "hooks/start", state.Annotations, hookMounts(logger, containerID, spec.Mounts))
+	if err == nil {
+		err = activate(logger, containerID, rootfs, state.Annotations)
+	}
+	if err != nil {
 		if !errors.Is(err, hooks.ErrRejected) {
-			// A failure that says nothing about the extension (timeout,
-			// cancellation, unreadable rootfs): fail the start call so the
-			// container stays created and the caller can retry it.
+			// Not the extension's fault: keep the container created.
 			return abortStart(logger, state, err)
 		}
-		// The extension itself refused the activation.
+		// The extension cannot activate, and no retry changes that.
 		logger.Error("extension refused activation", "id", containerID, "err", err.Error())
 		return stopContainer(logger, state, containerID, proxyFail, "Exited (1)")
 	}

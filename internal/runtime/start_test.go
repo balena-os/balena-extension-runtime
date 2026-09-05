@@ -1,11 +1,13 @@
 package runtime
 
 import (
+	"encoding/json"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/balena-os/balena-extension-runtime/internal/labels"
 	"github.com/balena-os/balena-extension-runtime/internal/oci"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/stretchr/testify/assert"
@@ -51,6 +53,18 @@ func writeCreatedState(t *testing.T, containerID, bundle string) {
 	state := oci.NewState(containerID, bundle)
 	state.Status = specs.StateCreated
 	state.Pid = 12345
+	require.NoError(t, oci.WriteState(state))
+}
+
+// writeCreatedStateAnnotated persists a Created state carrying the
+// annotations create would have enriched onto it. start reads them from the
+// state, not from the bundle.
+func writeCreatedStateAnnotated(t *testing.T, containerID, bundle string, annotations map[string]string) {
+	t.Helper()
+	state := oci.NewState(containerID, bundle)
+	state.Status = specs.StateCreated
+	state.Pid = 12345
+	state.Annotations = annotations
 	require.NoError(t, oci.WriteState(state))
 }
 
@@ -127,4 +141,136 @@ func TestStart_RuntimeFailureStillFailsTheStartCall(t *testing.T) {
 	state, err := oci.ReadState(containerID)
 	require.NoError(t, err)
 	assert.Equal(t, specs.StateCreated, state.Status, "a retryable failure must leave the container created")
+}
+
+// bundleWithRootfs writes an OCI bundle whose config points at an existing
+// rootfs, so a test can lay out the extension's content first.
+func bundleWithRootfs(t *testing.T, rootfs string, annotations map[string]string) string {
+	t.Helper()
+	bundle := t.TempDir()
+	spec := specs.Spec{
+		Version:     specs.Version,
+		Root:        &specs.Root{Path: rootfs},
+		Annotations: annotations,
+	}
+	data, err := json.MarshalIndent(spec, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(bundle, "config.json"), data, 0o644))
+	return bundle
+}
+
+// The extension's own hook runs before activation and short-circuits it. A
+// hook that declined after the arm would leave Exited (1) beside an armed
+// override, which no reader of either can reconcile.
+func TestStart_DecliningHookRunsBeforeActivation(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	root := activateHost(t)
+	rootfs, abi := activateRootfs(t, root, "kernel")
+	fabricatedVolume(t, root, "start-hook-first", "ext_test_abc_boot")
+
+	var armed int
+	armOverride = func(string) error {
+		armed++
+		return nil
+	}
+
+	annotations := map[string]string{
+		labels.Class:       labels.ClassOverlay,
+		labels.KernelABIID: abi,
+	}
+	bundle := bundleWithRootfs(t, rootfs, annotations)
+	hookDir := filepath.Join(rootfs, "hooks")
+	require.NoError(t, os.MkdirAll(hookDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(hookDir, "start"),
+		[]byte("#!/bin/sh\nexit 1\n"), 0o755))
+
+	writeCreatedStateAnnotated(t, "start-hook-first", bundle, annotations)
+	fake := &fakeStartProxy{}
+	fake.install(t)
+
+	require.NoError(t, Start(startTestLogger, "start-hook-first"))
+
+	assert.Equal(t, []int{12345}, fake.failed, "the hook's verdict is the container's")
+	assert.Zero(t, armed, "a declining hook must stop activation")
+	_, err := os.Stat(bootByABIDir)
+	assert.ErrorIs(t, err, os.ErrNotExist, "a declining hook must leave no link")
+}
+
+// A declined activation is the extension's verdict and travels as the
+// container's exit status, exactly as a declining hook does.
+func TestStart_DeclinedActivationFailsTheContainerNotTheCall(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	root := activateHost(t)
+	rootfs, _ := activateRootfs(t, root, "kernel")
+	fabricatedVolume(t, root, "start-declined", "ext_test_abc_boot")
+
+	annotations := map[string]string{
+		labels.Class:       labels.ClassOverlay,
+		labels.KernelABIID: "0000000000000000000000000000000000000000000000000000000000000000",
+	}
+	bundle := bundleWithRootfs(t, rootfs, annotations)
+	writeCreatedStateAnnotated(t, "start-declined", bundle, annotations)
+	fake := &fakeStartProxy{}
+	fake.install(t)
+
+	require.NoError(t, Start(startTestLogger, "start-declined"))
+
+	assert.Equal(t, []int{12345}, fake.failed)
+	assert.Empty(t, fake.started)
+
+	state, err := oci.ReadState("start-declined")
+	require.NoError(t, err)
+	assert.Equal(t, specs.StateStopped, state.Status)
+}
+
+// A machine condition fails the start call so the container stays created and
+// the caller can deploy it again, rather than recording a permanent refusal.
+func TestStart_RetryableActivationFailsTheCall(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	root := activateHost(t)
+	rootfs, abi := activateRootfs(t, root, "kernel")
+	fabricatedVolume(t, root, "start-retryable", "ext_test_abc_boot")
+	isMounted = func(string) (bool, error) { return false, nil }
+
+	annotations := map[string]string{
+		labels.Class:       labels.ClassOverlay,
+		labels.KernelABIID: abi,
+	}
+	bundle := bundleWithRootfs(t, rootfs, annotations)
+	writeCreatedStateAnnotated(t, "start-retryable", bundle, annotations)
+	fake := &fakeStartProxy{}
+	fake.install(t)
+
+	require.Error(t, Start(startTestLogger, "start-retryable"))
+
+	assert.Empty(t, fake.failed, "a machine condition is not a verdict")
+	assert.Empty(t, fake.started)
+	assert.Equal(t, []int{12345}, fake.stopped, "the proxy must not be left behind")
+}
+
+func TestStart_ActivatedExtensionExitsZero(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	root := activateHost(t)
+	rootfs, abi := activateRootfs(t, root, "kernel")
+	fabricatedVolume(t, root, "start-armed", "ext_test_abc_boot")
+
+	var armed []string
+	armOverride = func(a string) error {
+		armed = append(armed, a)
+		return nil
+	}
+
+	annotations := map[string]string{
+		labels.Class:       labels.ClassOverlay,
+		labels.KernelABIID: abi,
+	}
+	bundle := bundleWithRootfs(t, rootfs, annotations)
+	writeCreatedStateAnnotated(t, "start-armed", bundle, annotations)
+	fake := &fakeStartProxy{}
+	fake.install(t)
+
+	require.NoError(t, Start(startTestLogger, "start-armed"))
+
+	assert.Equal(t, []int{12345}, fake.started)
+	assert.Equal(t, []string{abi}, armed)
 }
