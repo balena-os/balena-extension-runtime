@@ -42,8 +42,9 @@ The runtime follows the standard OCI container lifecycle:
 
 1. `create` — Reads `config.json`, validates extension labels, runs the
    `hooks/create` hook, spawns a proxy process, and writes OCI state
-2. `start` — Runs the `hooks/start` hook, signals the proxy to exit cleanly
-   (SIGUSR1), and transitions the container to `stopped`
+2. `start` — Runs the `hooks/start` hook and signals the proxy with the
+   outcome: SIGUSR1 if the extension activated, SIGUSR2 if it refused. The
+   container transitions to `stopped` either way
 3. `kill` — Sends a signal to the proxy process
 4. `delete` — Runs the `hooks/delete` hook and removes runtime state
 5. `state` — Returns OCI state JSON to stdout
@@ -61,8 +62,13 @@ The runtime spawns a proxy subprocess (`balena-extension-runtime proxy`)
 during `create` to give containerd a real PID to track between `create` and
 `start`. The proxy blocks on signals:
 
-- **SIGUSR1** — "start complete", exit cleanly (container shows "Exited (0)")
+- **SIGUSR1** — activation succeeded, exit 0 (container shows "Exited (0)")
+- **SIGUSR2** — the extension refused the activation, exit 1 (container shows
+  "Exited (1)")
 - **SIGTERM/SIGINT** — killed, exit cleanly
+
+The proxy's exit status is what the engine records as the container's verdict,
+which is how a refusal reaches the caller without failing the `start` call.
 
 ### Extension labels
 
@@ -91,6 +97,16 @@ Hooks receive the following environment variables:
   `EXTENSION_IMAGE_KERNEL_ABI_ID`). The forwarding is prefix-based, so custom
   or future labels are available to hooks without runtime changes.
 
+#### Where an extension declines activation
+
+`hooks/start` is the only rejection point. An extension that inspects the host
+and decides it must not activate exits non-zero there: the runtime records the
+container as `Exited (1)` and reports the `start` call as successful, so the
+caller stops rather than retrying a decision that will not change.
+
+`hooks/create` runs before the proxy process exists, so there is no container
+status to carry a verdict.
+
 ### State management
 
 OCI state is persisted as JSON under
@@ -103,24 +119,41 @@ The manager command (`balena-extension-manager`) runs outside the OCI
 lifecycle. It is invoked from HUP hooks and ad-hoc maintenance. The binary
 is a hard link to `balena-extension-runtime` and dispatches on `argv[0]`.
 
+The manager's two cleanup calls are split by what each one can reach, not by
+object type and not by update window.
+
 ### `cleanup`
 
-Removes dead extension containers. Safe to run at any time.
+Runs on every boot, with the engine up. It removes the extension containers the
+engine calls garbage (dead, or a failed runtime create) and the fabricated
+`ext_*` volumes no surviving container claims. Safe to run at any time.
 
 ```
 balena-extension-manager cleanup
 ```
 
+The volume sweep takes its snapshot of the volumes before it lists the
+containers, and that order is the whole in-use proof: everything in the sweep
+set was on disk before the claim query ran, so a deploy landing mid-sweep
+writes a volume the set does not hold. A claim query it cannot complete, a
+container that fabricates a volume but carries no image id, abandons the sweep
+and fails the call rather than collecting against a short answer.
+
 ### `cleanup --stale-os`
 
-Post-commit cleanup: removes dead containers, containers whose
-`kernel-version` or `kernel-abi-id` labels mismatch the running kernel,
-and extension images whose `io.balena.image.os-version` label doesn't
-match `/etc/os-release` `VERSION_ID`.
+Post-commit cleanup: additionally removes containers whose `kernel-version` or
+`kernel-abi-id` labels mismatch the running kernel, and extension images whose
+`io.balena.image.os-version` label doesn't match `/etc/os-release`
+`VERSION_ID`. Volumes are not in this pass.
 
-This flag is safe **only after** the HUP rollback-health commit. Outside
-that window, stale containers and images are the rollback target and
-must be preserved.
+This flag is safe **only after** the HUP rollback-health commit. Outside that
+window, a stale image is the rollback target and must be preserved.
+
+It is not the primary convergence path for containers. The device agent already
+drops a container whose claim the running kernel did not honour, at its next
+poll and with no window gating. This pass is the orphan net for extensions the
+agent cannot see: a manual deploy, or a release it no longer tracks. Images are
+the part only this pass can do.
 
 ### `os-version` label grammar
 

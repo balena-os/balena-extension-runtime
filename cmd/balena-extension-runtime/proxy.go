@@ -18,13 +18,21 @@ var proxyCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		logger.Debug("proxy started", "container", proxyContainerID)
 
-		// Block until SIGUSR1 (start complete), SIGTERM, or SIGINT. All three
-		// mean "exit cleanly" — SIGUSR1 is how `start` signals that the
-		// extension has finished installing; SIGTERM/SIGINT are normal stops.
-		// Returning nil lets cobra/main exit with code 0.
+		// Block until signaled. The proxy is the container's process, so its
+		// exit status is what the engine records as the container's verdict:
+		// SIGUSR1 is `start` reporting the activation succeeded (exit 0),
+		// SIGUSR2 is `start` reporting the extension refused it (exit 1),
+		// SIGTERM/SIGINT are normal stops (exit 0). Returning nil lets
+		// cobra/main exit with code 0.
 		sigCh := make(chan os.Signal, 1)
-		signal.Notify(sigCh, syscall.SIGUSR1, syscall.SIGTERM, syscall.SIGINT)
-		<-sigCh
+		signal.Notify(sigCh, syscall.SIGUSR1, syscall.SIGUSR2, syscall.SIGTERM, syscall.SIGINT)
+		if sig := <-sigCh; sig == syscall.SIGUSR2 {
+			// Exit directly rather than returning an error: the non-zero
+			// status is the message, and routing it through main's error
+			// path would log a runtime failure that did not happen.
+			CloseLogger()
+			os.Exit(1)
+		}
 		return nil
 	},
 }

@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net"
@@ -107,7 +108,65 @@ func TestRemoveContainer(t *testing.T) {
 	})
 
 	eng := testEngine(sock)
-	require.NoError(t, eng.RemoveContainer(context.Background(), "abc123"))
+	require.NoError(t, eng.RemoveContainer(context.Background(), quietLogger(), "abc123"))
+}
+
+// A DELETE that fails and leaves the container dead is the normal outcome for
+// an extension composed into the running root: dead is the mount exclusion the
+// removal was after, so the helper reports success and says why.
+func TestRemoveContainer_DeadIsSuccess(t *testing.T) {
+	const id = "abc123"
+	stub := newEngineStub()
+	stub.RemoveContainerStatus = map[string]int{id: 500}
+	stub.Inspects[id] = inspectJSON(id, "dead", "", 0)
+	eng := testEngine(testServer(t, stub.handler()))
+
+	var buf bytes.Buffer
+	require.NoError(t, eng.RemoveContainer(context.Background(), loggerCapturing(&buf), id))
+	assert.Contains(t, buf.String(), id, "a tolerated removal has to name the container it tolerated")
+}
+
+// Any other status leaves the removal a failure, and the failure reported is
+// the removal's own: the inspect was only the question asked about it.
+func TestRemoveContainer_OtherStatusReturnsDeleteError(t *testing.T) {
+	const id = "abc123"
+	stub := newEngineStub()
+	stub.RemoveContainerStatus = map[string]int{id: 500}
+	stub.Inspects[id] = inspectJSON(id, "exited", "", 0)
+	eng := testEngine(testServer(t, stub.handler()))
+
+	err := eng.RemoveContainer(context.Background(), quietLogger(), id)
+	var engErr *engineError
+	require.ErrorAs(t, err, &engErr)
+	assert.Equal(t, "DELETE", engErr.Method)
+	assert.Equal(t, 500, engErr.Status)
+}
+
+// A failing inspect answers nothing about the removal, so the removal's error
+// stands and the inspect's is never surfaced in its place.
+func TestRemoveContainer_FailedInspectReturnsDeleteError(t *testing.T) {
+	const id = "abc123"
+	stub := newEngineStub()
+	stub.RemoveContainerStatus = map[string]int{id: 500}
+	stub.InspectStatus = map[string]int{id: 404}
+	eng := testEngine(testServer(t, stub.handler()))
+
+	err := eng.RemoveContainer(context.Background(), quietLogger(), id)
+	var engErr *engineError
+	require.ErrorAs(t, err, &engErr)
+	assert.Equal(t, "DELETE", engErr.Method)
+	assert.Equal(t, 500, engErr.Status)
+}
+
+// The tolerance costs a request, so it is only paid for on failure.
+func TestRemoveContainer_SuccessIssuesNoInspect(t *testing.T) {
+	const id = "abc123"
+	stub := newEngineStub()
+	eng := testEngine(testServer(t, stub.handler()))
+
+	require.NoError(t, eng.RemoveContainer(context.Background(), quietLogger(), id))
+	assert.Empty(t, stub.inspectedIDsSnapshot())
+	assert.Equal(t, []string{id}, stub.removedContainersSnapshot())
 }
 
 func TestListImages(t *testing.T) {
@@ -286,4 +345,95 @@ func TestRemoveVolume(t *testing.T) {
 	eng := testEngine(sock)
 	require.NoError(t, eng.RemoveVolume(context.Background(), "v1"))
 	assert.True(t, called)
+}
+
+func TestCreateVolume(t *testing.T) {
+	sock := testServer(t, func(method, path string, body []byte) (int, []byte) {
+		assert.Equal(t, "POST", method)
+		assert.Equal(t, "/volumes/create", path)
+		assert.JSONEq(t, `{"Name":"ext_kernel-modules_42befc76f4f8_boot",
+			"Labels":{"io.balena.image.class":"overlay"}}`, string(body))
+		return 201, []byte(`{"Name":"ext_kernel-modules_42befc76f4f8_boot",
+			"Mountpoint":"/var/lib/docker/volumes/ext_kernel-modules_42befc76f4f8_boot/_data",
+			"Labels":{"io.balena.image.class":"overlay"}}`)
+	})
+
+	eng := testEngine(sock)
+	vol, err := eng.CreateVolume(context.Background(), "ext_kernel-modules_42befc76f4f8_boot",
+		map[string]string{"io.balena.image.class": "overlay"})
+	require.NoError(t, err)
+	assert.Equal(t, "ext_kernel-modules_42befc76f4f8_boot", vol.Name)
+	assert.Equal(t, "/var/lib/docker/volumes/ext_kernel-modules_42befc76f4f8_boot/_data", vol.Mountpoint)
+}
+
+// TestCreateVolume_ExistingVolume pins the create-or-get behaviour the
+// engine gives us: a name that already exists comes back as the existing
+// volume, with the labels it was created with rather than the ones just
+// passed. Fabrication depends on that not being a conflict.
+func TestCreateVolume_ExistingVolume(t *testing.T) {
+	sock := testServer(t, func(_, _ string, _ []byte) (int, []byte) {
+		return 201, []byte(`{"Name":"ext_svc_abc123456789_boot",
+			"Mountpoint":"/var/lib/docker/volumes/ext_svc_abc123456789_boot/_data",
+			"Labels":{"io.balena.image.class":"overlay","io.balena.image.kernel-abi-id":"original"}}`)
+	})
+
+	eng := testEngine(sock)
+	vol, err := eng.CreateVolume(context.Background(), "ext_svc_abc123456789_boot",
+		map[string]string{"io.balena.image.kernel-abi-id": "ignored"})
+	require.NoError(t, err)
+	assert.Equal(t, "/var/lib/docker/volumes/ext_svc_abc123456789_boot/_data", vol.Mountpoint)
+	assert.Equal(t, "original", vol.Labels["io.balena.image.kernel-abi-id"],
+		"labels are only applied at first creation; the existing volume keeps its own")
+}
+
+// TestCreateVolume_NoLabels asserts an empty label set is omitted from the
+// body rather than serialised as null.
+func TestCreateVolume_NoLabels(t *testing.T) {
+	sock := testServer(t, func(_, _ string, body []byte) (int, []byte) {
+		assert.JSONEq(t, `{"Name":"ext_svc_abc123456789_boot"}`, string(body))
+		return 201, []byte(`{"Name":"ext_svc_abc123456789_boot","Mountpoint":"/mnt"}`)
+	})
+
+	eng := testEngine(sock)
+	_, err := eng.CreateVolume(context.Background(), "ext_svc_abc123456789_boot", nil)
+	require.NoError(t, err)
+}
+
+func TestCreateVolume_EngineError(t *testing.T) {
+	sock := testServer(t, func(_, _ string, _ []byte) (int, []byte) {
+		return 500, []byte("volume driver failed")
+	})
+
+	eng := testEngine(sock)
+	_, err := eng.CreateVolume(context.Background(), "ext_svc_abc123456789_boot", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "volume driver failed")
+}
+
+// TestNewEngine_DockerHost pins which DOCKER_HOST values may redirect the
+// socket.
+func TestNewEngine_DockerHost(t *testing.T) {
+	tests := []struct {
+		dockerHost string
+		want       string
+	}{
+		{"", defaultSocket},
+		{"unix:///var/run/docker.sock", "/var/run/docker.sock"},
+		{"/var/run/docker.sock", "/var/run/docker.sock"},
+		{"tcp://docker:2375", defaultSocket},
+		{"npipe:////./pipe/docker_engine", defaultSocket},
+		// A scheme with nothing after it names no socket, and dialing the
+		// empty string can only fail.
+		{"unix://", defaultSocket},
+		// Relative paths resolve against whatever working directory the
+		// process happens to have, which for the runtime is containerd's.
+		{"unix://run/docker.sock", defaultSocket},
+		{"run/docker.sock", defaultSocket},
+	}
+	for _, tc := range tests {
+		t.Run(tc.dockerHost, func(t *testing.T) {
+			t.Setenv("DOCKER_HOST", tc.dockerHost)
+			assert.Equal(t, tc.want, NewEngine().socket)
+		})
+	}
 }

@@ -2,17 +2,19 @@ package manager
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
-	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/balena-os/balena-extension-runtime/internal/labels"
 )
 
 const (
@@ -26,11 +28,14 @@ var maxResponseBytes = 32 << 20 // 32 MiB
 
 // Container is the subset of Docker's container JSON we need.
 type Container struct {
-	ID     string            `json:"Id"`
-	Image  string            `json:"Image"`
-	State  string            `json:"State"`
-	Labels map[string]string `json:"Labels"`
-	Mounts []MountPoint      `json:"Mounts"`
+	ID string `json:"Id"`
+	// Image is the reference the container was created from.
+	Image string `json:"Image"`
+	// ImageID is the content digest it resolved to.
+	ImageID string            `json:"ImageID"`
+	State   string            `json:"State"`
+	Labels  map[string]string `json:"Labels"`
+	Mounts  []MountPoint      `json:"Mounts"`
 }
 
 // MountPoint is the subset of a container's mount entry we need.
@@ -64,13 +69,28 @@ type Engine struct {
 }
 
 // NewEngine returns an Engine connected to the Docker socket.
-// It honours the DOCKER_HOST env var (unix:// scheme only).
+//
+// DOCKER_HOST overrides the socket, but only when it names one by absolute
+// path: either a "unix://" URL or a bare path.
 func NewEngine() *Engine {
 	sock := defaultSocket
-	if dh := os.Getenv("DOCKER_HOST"); dh != "" {
-		sock = strings.TrimPrefix(dh, "unix://")
+	if path, ok := unixSocketPath(os.Getenv("DOCKER_HOST")); ok {
+		sock = path
 	}
 	return &Engine{socket: sock}
+}
+
+// unixSocketPath returns the absolute socket path a DOCKER_HOST value names,
+// and whether it named one at all.
+func unixSocketPath(dockerHost string) (string, bool) {
+	path := dockerHost
+	if trimmed, ok := strings.CutPrefix(dockerHost, "unix://"); ok {
+		path = trimmed
+	}
+	if !filepath.IsAbs(path) {
+		return "", false
+	}
+	return path, true
 }
 
 // CheckSocket verifies the engine socket exists and is a unix socket,
@@ -81,31 +101,25 @@ func (e *Engine) CheckSocket() error {
 	info, err := os.Stat(e.socket)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return fmt.Errorf("balena-engine socket not found at %s (override via DOCKER_HOST=unix:///path/to/socket)", e.socket)
+			return fmt.Errorf("%w: socket not found at %s (override via DOCKER_HOST=unix:///path/to/socket)", ErrEngineUnavailable, e.socket)
 		}
-		return fmt.Errorf("stat %s: %w", e.socket, err)
+		return fmt.Errorf("%w: stat %s: %w", ErrEngineUnavailable, e.socket, err)
 	}
 	if info.Mode()&os.ModeSocket == 0 {
-		return fmt.Errorf("%s is not a unix socket", e.socket)
+		return fmt.Errorf("%w: %s is not a unix socket", ErrEngineUnavailable, e.socket)
 	}
 	return nil
 }
 
-// do sends an HTTP/1.1 request over the unix socket and returns the decoded
+// do sends an HTTP/1.0 request over the unix socket and returns the decoded
 // response body.
 //
-// We deliberately avoid http.Client / http.Transport: Transport's reachable
-// call graph drags crypto/tls and HTTP/2 into the binary, neither of which
-// we need for a unix-socket transport. Instead we dial directly and use
-// net/http's low-level primitives — http.Request.Write for serialising the
-// request and http.ReadResponse for parsing chunked/length-delimited
-// replies. These stay TLS-free while still giving us stdlib-grade
-// correctness for the tricky parts.
+// We deliberately avoid net/http entirely to avoid dependency creep
 func (e *Engine) do(ctx context.Context, method, path string, body []byte) ([]byte, error) {
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, "unix", e.socket)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: dial %s: %w", ErrEngineUnavailable, e.socket, err)
 	}
 	defer conn.Close()
 
@@ -126,33 +140,14 @@ func (e *Engine) do(ctx context.Context, method, path string, body []byte) ([]by
 	stopCancel := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stopCancel()
 
-	// Build the request. Host "localhost" is arbitrary (ignored by the
-	// engine, which only cares about the path). http.NewRequestWithContext
-	// parses the URL and rejects CRLF in the path for us.
-	var reqBody io.Reader
-	if body != nil {
-		reqBody = bytes.NewReader(body)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, "http://localhost"+path, reqBody)
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-	req.Close = true
-	if body != nil {
-		req.ContentLength = int64(len(body))
-		req.Header.Set("Content-Type", "application/json")
-	}
-	if err := req.Write(conn); err != nil {
+	if err := writeRequest(conn, method, path, body); err != nil {
 		return nil, fmt.Errorf("write request: %w", err)
 	}
 
-	// http.ReadResponse decodes chunked transfer-encoding, trailers, and
-	// content-length framing for us.
-	resp, err := http.ReadResponse(bufio.NewReader(conn), req)
+	resp, err := readResponse(bufio.NewReader(conn))
 	if err != nil {
 		return nil, fmt.Errorf("read response: %w", err)
 	}
-	defer resp.Body.Close()
 
 	// Cap response size to avoid OOM on a buggy or malicious engine.
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxResponseBytes+1)))
@@ -163,9 +158,23 @@ func (e *Engine) do(ctx context.Context, method, path string, body []byte) ([]by
 		return nil, fmt.Errorf("engine: %s %s: response body exceeds %d bytes", method, path, maxResponseBytes)
 	}
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("engine: %s %s: %d %s", method, path, resp.StatusCode, string(respBody))
+		return nil, &engineError{Status: resp.StatusCode, Method: method, Path: path, Body: string(respBody)}
 	}
 	return respBody, nil
+}
+
+// engineError is a response the engine refused. It carries the status code so
+// a caller can tell "no such object" from a fault without matching on the
+// message text.
+type engineError struct {
+	Status int
+	Method string
+	Path   string
+	Body   string
+}
+
+func (e *engineError) Error() string {
+	return fmt.Sprintf("engine: %s %s: %d %s", e.Method, e.Path, e.Status, e.Body)
 }
 
 // labelFilterQuery builds the url-encoded `filters` query value that the
@@ -189,9 +198,25 @@ func (e *Engine) ListContainers(ctx context.Context, labelFilter string) ([]Cont
 }
 
 // RemoveContainer force-removes a container by ID.
-func (e *Engine) RemoveContainer(ctx context.Context, id string) error {
+//
+// An extension removal that leaves the container Dead is a success.
+// At that point the removal has done everything a removal of a mounted
+// extension can do. The dead sweep collects the container after a reboot
+// unpins it.
+func (e *Engine) RemoveContainer(ctx context.Context, logger *slog.Logger, id string) error {
 	_, err := e.do(ctx, "DELETE", fmt.Sprintf("/containers/%s?force=true&v=true", url.PathEscape(id)), nil)
-	return err
+	if err == nil {
+		return nil
+	}
+	ci, inspectErr := e.InspectContainer(ctx, id)
+	if inspectErr != nil || ci.State.Status != "dead" {
+		// Report the removal's own failure; the inspect was only ever a way to
+		// ask whether that failure meant anything.
+		return err
+	}
+	logger.Info("removal left the container dead; treating it as removed",
+		"id", labels.ShortID(id))
+	return nil
 }
 
 // InspectContainer returns the per-container inspect payload for ID.
@@ -228,8 +253,9 @@ func (e *Engine) RemoveImage(ctx context.Context, id string) error {
 }
 
 type Volume struct {
-	Name   string            `json:"Name"`
-	Labels map[string]string `json:"Labels"`
+	Name       string            `json:"Name"`
+	Mountpoint string            `json:"Mountpoint"`
+	Labels     map[string]string `json:"Labels"`
 }
 
 type volumeListResponse struct {
@@ -237,7 +263,7 @@ type volumeListResponse struct {
 }
 
 // ListVolumes returns volumes from the engine. If danglingOnly is true the
-// query is filtered to dangling=true — volumes with no container references.
+// query is filtered to dangling=true: volumes with no container references.
 func (e *Engine) ListVolumes(ctx context.Context, danglingOnly bool) ([]Volume, error) {
 	path := "/volumes"
 	if danglingOnly {
@@ -252,6 +278,36 @@ func (e *Engine) ListVolumes(ctx context.Context, danglingOnly bool) ([]Volume, 
 		return nil, fmt.Errorf("decode volume list: %w", err)
 	}
 	return resp.Volumes, nil
+}
+
+// volumeCreateRequest is the POST /volumes/create body. Labels is omitted
+// when empty so the engine is never handed a null it would have to interpret.
+type volumeCreateRequest struct {
+	Name   string            `json:"Name"`
+	Labels map[string]string `json:"Labels,omitempty"`
+}
+
+// CreateVolume creates a named volume carrying labels and returns the
+// engine's view of it, including the host path the volume is backed by.
+//
+// A name that already exists comes back as the existing volume rather
+// than a conflict.
+// Labels are only ever applied at first creation; the engine ignores
+// them for a volume that already exists.
+func (e *Engine) CreateVolume(ctx context.Context, name string, labels map[string]string) (*Volume, error) {
+	body, err := json.Marshal(volumeCreateRequest{Name: name, Labels: labels})
+	if err != nil {
+		return nil, fmt.Errorf("encode volume create: %w", err)
+	}
+	data, err := e.do(ctx, "POST", "/volumes/create", body)
+	if err != nil {
+		return nil, err
+	}
+	var v Volume
+	if err := json.Unmarshal(data, &v); err != nil {
+		return nil, fmt.Errorf("decode volume create: %w", err)
+	}
+	return &v, nil
 }
 
 // RemoveVolume deletes a named volume. Errors are propagated as-is so the

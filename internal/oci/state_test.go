@@ -91,3 +91,31 @@ func TestReadStateNotFound(t *testing.T) {
 	_, err := ReadState("nonexistent")
 	require.Error(t, err)
 }
+
+func TestBootVolumeRoundTrip(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	const source = "/var/lib/docker/volumes/ext_svc_abc_boot/_data"
+	require.NoError(t, WriteBootVolume("abc123", source))
+
+	got, err := ReadBootVolume("abc123")
+	require.NoError(t, err)
+	assert.Equal(t, source, got)
+
+	// RemoveState drops the record with the rest of the container's state.
+	require.NoError(t, RemoveState("abc123"))
+	got, err = ReadBootVolume("abc123")
+	require.NoError(t, err)
+	assert.Empty(t, got)
+}
+
+// TestReadBootVolumeAbsent asserts a container that fabricated nothing, and
+// one created before the runtime fabricated anything, both read as no volume
+// rather than as an error the hook paths would have to special-case.
+func TestReadBootVolumeAbsent(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	got, err := ReadBootVolume("never-created")
+	require.NoError(t, err)
+	assert.Empty(t, got)
+}

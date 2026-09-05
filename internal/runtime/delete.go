@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -89,5 +90,5 @@ func runDeleteHook(logger *slog.Logger, state *specs.State) error {
 	if err != nil {
 		return fmt.Errorf("resolve rootfs: %w", err)
 	}
-	return hooks.ExecuteIfPresent(logger, rootfs, "hooks/delete", state.Annotations, spec.Mounts)
+	return hooks.ExecuteIfPresent(context.Background(), logger, rootfs, "hooks/delete", state.Annotations, hookMounts(logger, state.ID, spec.Mounts))
 }

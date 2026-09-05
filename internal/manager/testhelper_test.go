@@ -2,15 +2,39 @@ package manager
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 )
+
+// TestMain redirects the cross-process operation lock to a writable path for
+// the whole package. Its real home is under /run, which a test run has no
+// business creating files in and generally cannot.
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "manager-lock")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "create lock directory:", err)
+		os.Exit(1)
+	}
+	lockPath = filepath.Join(dir, "operation.lock")
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
+}
+
+// loggerCapturing writes to buf so a test can assert on what a path reports
+// when it cannot do its job.
+func loggerCapturing(buf *bytes.Buffer) *slog.Logger {
+	return slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
 
 // testServer starts a mock HTTP server on a Unix socket.
 // handler receives the method, path, and request body, and returns a status code and response body.
@@ -113,16 +137,20 @@ func handleConn(conn net.Conn, handler func(string, string, []byte) (int, []byte
 // All fields are mu-protected: requests are served on the listener's
 // goroutines, not the test's.
 type engineStub struct {
-	mu                sync.Mutex
-	Containers        []Container
-	Images            []Image
-	Inspects          map[string]string
-	InspectStatus     map[string]int
-	ImagesListStatus  int
-	RemovedContainers []string
-	RemovedImages     []string
-	Volumes           []Volume
-	RemovedVolumes    []string
+	mu                    sync.Mutex
+	Containers            []Container
+	Images                []Image
+	Inspects              map[string]string
+	InspectStatus         map[string]int
+	ImagesListStatus      int
+	RemovedContainers     []string
+	RemovedImages         []string
+	Volumes               []Volume
+	RemovedVolumes        []string
+	RemoveContainerStatus map[string]int
+	// InspectedIDs records every container inspect the stub served, so a
+	// test can assert that a path issued none.
+	InspectedIDs []string
 
 	// onInspect, when set, supplies the inspect body for id in place of the
 	// Inspects map, so a test can make consecutive inspects differ. It is
@@ -130,6 +158,11 @@ type engineStub struct {
 	// stub: returning the body leaves it nothing to mutate, and so nothing
 	// that could re-enter the lock the handler is already holding.
 	onInspect func(id string) string
+
+	// deployDuringVolumeList stands in for a deploy landing between the sweep's
+	// two snapshots. Like onInspect it is handed no reference to the stub, so it
+	// cannot re-enter the lock the handler already holds.
+	deployDuringVolumeList func() []Container
 }
 
 func newEngineStub() *engineStub {
@@ -153,6 +186,7 @@ func (s *engineStub) handler() func(method, path string, body []byte) (int, []by
 			return 200, resp
 		case method == "GET" && strings.HasPrefix(path, "/containers/") && strings.HasSuffix(path, "/json"):
 			id := strings.TrimSuffix(strings.TrimPrefix(path, "/containers/"), "/json")
+			s.InspectedIDs = append(s.InspectedIDs, id)
 			if code, ok := s.InspectStatus[id]; ok {
 				return code, []byte(`{"message":"injected"}`)
 			}
@@ -166,6 +200,9 @@ func (s *engineStub) handler() func(method, path string, body []byte) (int, []by
 		case method == "DELETE" && strings.HasPrefix(path, "/containers/"):
 			id := strings.TrimPrefix(path, "/containers/")
 			id = strings.SplitN(id, "?", 2)[0]
+			if code, ok := s.RemoveContainerStatus[id]; ok {
+				return code, []byte(`{"message":"injected"}`)
+			}
 			s.RemovedContainers = append(s.RemovedContainers, id)
 			return 204, nil
 		case method == "GET" && strings.HasPrefix(path, "/images/json"):
@@ -183,6 +220,10 @@ func (s *engineStub) handler() func(method, path string, body []byte) (int, []by
 			resp, _ := json.Marshal(struct {
 				Volumes []Volume `json:"Volumes"`
 			}{Volumes: s.Volumes})
+			if s.deployDuringVolumeList != nil {
+				s.Containers = append(s.Containers, s.deployDuringVolumeList()...)
+				s.deployDuringVolumeList = nil
+			}
 			return 200, resp
 		case method == "DELETE" && strings.HasPrefix(path, "/volumes/"):
 			name := strings.TrimPrefix(path, "/volumes/")
@@ -206,10 +247,19 @@ func (s *engineStub) removedContainersSnapshot() []string {
 	return out
 }
 
+// inspectedIDsSnapshot returns a copy of InspectedIDs taken under the stub's
+// lock, for reading the record from the test goroutine.
+func (s *engineStub) inspectedIDsSnapshot() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, len(s.InspectedIDs))
+	copy(out, s.InspectedIDs)
+	return out
+}
+
 // inspectJSON builds a minimal ContainerInspect body. Most cleanup tests
 // only need the State subfields.
 func inspectJSON(id, status, errMsg string, exitCode int) string {
 	return fmt.Sprintf(`{"Id":%q,"State":{"Status":%q,"Error":%q,"ExitCode":%d}}`,
 		id, status, errMsg, exitCode)
 }
-

@@ -196,6 +196,34 @@ func TestCreateRejectsMissingLabels(t *testing.T) {
 	assert.Contains(t, string(out), "missing required label")
 }
 
+// TestCreateRejectsKernelOverrideWithoutAnImageID pins the contract an
+// extension claiming a kernel now creates under: its /boot volume is named
+// after the image id, that id comes from the container store, and a store the
+// runtime cannot read leaves the volume unnameable.
+//
+// Failing is the point. Carrying on would mint a name that collides across
+// builds, and the name is the only route back to the volume: a redeploy reuses
+// it, and cleanup's retention guard recognises the volume by it.
+// Fabrication itself needs a live engine, so it is the integration suite that
+// covers it; this is the half that can be pinned against the real binary.
+func TestCreateRejectsKernelOverrideWithoutAnImageID(t *testing.T) {
+	stateDir := t.TempDir()
+
+	bundle := setupBundle(t, map[string]string{
+		"io.balena.image.class":         "overlay",
+		"io.balena.image.kernel-abi-id": "sha256:abc123",
+	})
+
+	// A docker root with no entry for this container, which is what an
+	// unreadable or misconfigured container store looks like from here.
+	cmd := exec.Command(runtimeBin, "--docker-root", t.TempDir(),
+		"create", "--bundle", bundle, "no-image-id-test")
+	cmd.Env = append(os.Environ(), "XDG_RUNTIME_DIR="+stateDir)
+	out, err := cmd.CombinedOutput()
+	require.Error(t, err)
+	assert.Contains(t, string(out), "image id")
+}
+
 func TestKillProxy(t *testing.T) {
 	stateDir := t.TempDir()
 	t.Setenv("XDG_RUNTIME_DIR", stateDir)
@@ -239,8 +267,7 @@ func TestHookExecution(t *testing.T) {
 	stateDir := t.TempDir()
 
 	bundle := setupBundle(t, map[string]string{
-		"io.balena.image.class":         "overlay",
-		"io.balena.image.kernel-abi-id": "sha256:abc123",
+		"io.balena.image.class": "overlay",
 	})
 
 	// Add a create hook

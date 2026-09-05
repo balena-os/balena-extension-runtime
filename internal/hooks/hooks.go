@@ -2,6 +2,7 @@ package hooks
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -26,13 +27,18 @@ const hookTimeout = 60 * time.Second
 // environment could influence execution.
 const hookEnvPath = "/usr/sbin:/usr/bin:/sbin:/bin"
 
+// ErrRejected marks a failure that belongs to the extension image rather than
+// to the runtime or the machine it runs on: a hook that exited non-zero, or
+// an activation the image cannot pass however often it is retried.
+var ErrRejected = errors.New("activation rejected by extension")
+
 // ExecuteIfPresent runs a hook script from the extension rootfs if it exists.
 // The hook path is relative to rootfs (e.g., "hooks/create").
 // Returns nil if the hook does not exist.
 //
 // Extension images are assumed trusted, so we do not defend against
 // symlinks under hooks/ redirecting execution to arbitrary host binaries.
-func ExecuteIfPresent(logger *slog.Logger, rootfs string, hookPath string, annotations map[string]string, specMounts []specs.Mount) error {
+func ExecuteIfPresent(ctx context.Context, logger *slog.Logger, rootfs string, hookPath string, annotations map[string]string, specMounts []specs.Mount) error {
 	if filepath.IsAbs(hookPath) {
 		return fmt.Errorf("hook path %q must be relative to rootfs", hookPath)
 	}
@@ -51,10 +57,10 @@ func ExecuteIfPresent(logger *slog.Logger, rootfs string, hookPath string, annot
 		return fmt.Errorf("failed to stat hook %s: %w", absPath, err)
 	}
 	if info.IsDir() {
-		return fmt.Errorf("hook %s is a directory, not executable", absPath)
+		return fmt.Errorf("%w: hook %s is a directory, not executable", ErrRejected, absPath)
 	}
 	if info.Mode()&0o111 == 0 {
-		return fmt.Errorf("hook %s is not executable", absPath)
+		return fmt.Errorf("%w: hook %s is not executable", ErrRejected, absPath)
 	}
 
 	logger.Info("executing hook", "hook", hookPath, "rootfs", rootfs)
@@ -64,8 +70,8 @@ func ExecuteIfPresent(logger *slog.Logger, rootfs string, hookPath string, annot
 	// which can include auth tokens, TTRPC addresses, and API credentials.
 	// A hook script is extension-provided code and must not receive those.
 	// The contract is documented: hooks see PATH, EXTENSION_ROOTFS, the
-	// extension label env (labels.ToEnv), and the mount volume env
-	// (mounts.ToEnv).
+	// extension label env (labels.ToEnv) and the mount volume env
+	// (mounts.ToEnv), and nothing else.
 	env := []string{
 		"PATH=" + hookEnvPath,
 		"EXTENSION_ROOTFS=" + rootfs,
@@ -73,19 +79,25 @@ func ExecuteIfPresent(logger *slog.Logger, rootfs string, hookPath string, annot
 	env = append(env, labels.ToEnv(annotations)...)
 	env = append(env, mounts.ToEnv(specMounts)...)
 
-	ctx, cancel := context.WithTimeout(context.Background(), hookTimeout)
+	hookCtx, cancel := context.WithTimeout(ctx, hookTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, absPath)
+	cmd := exec.CommandContext(hookCtx, absPath)
 	cmd.Env = env
 	cmd.Stdout = os.Stderr // hooks log to runtime stderr
 	cmd.Stderr = os.Stderr
 
 	if err := cmd.Run(); err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
+		if ctx.Err() != nil {
+			return fmt.Errorf("hook %s aborted: %w", hookPath, ctx.Err())
+		}
+		if hookCtx.Err() == context.DeadlineExceeded {
+			// A hook that ran out of time may have been starved rather than
+			// broken, so this stays retryable and is deliberately not a
+			// rejection.
 			return fmt.Errorf("hook %s timed out after %s", hookPath, hookTimeout)
 		}
-		return fmt.Errorf("hook %s failed: %w", hookPath, err)
+		return fmt.Errorf("%w: hook %s failed: %w", ErrRejected, hookPath, err)
 	}
 
 	logger.Info("hook completed", "hook", hookPath)
