@@ -294,7 +294,7 @@ func TestCleanup_CollectsVolumeOfAWithdrawnKernelOverride(t *testing.T) {
 	tag := uniqueName("ext-withdrawn")
 	buildExtensionImageWithContent(t, tag,
 		map[string]string{"boot/kernel": "vmlinuz"},
-		"io.balena.image.kernel-abi-id=6.6.20-withdrawn",
+		"io.balena.image.kernel-abi-id="+kernelABI("vmlinuz"),
 		"io.balena.image.os-version="+hostOSVersion(t))
 	defer dockerExecMayFail(t, "rmi", "-f", tag)
 
@@ -320,7 +320,7 @@ func TestCleanup_RetainsVolumeOfALiveKernelOverride(t *testing.T) {
 	tag := uniqueName("ext-live")
 	buildExtensionImageWithContent(t, tag,
 		map[string]string{"boot/kernel": "vmlinuz"},
-		"io.balena.image.kernel-abi-id=6.6.20-live")
+		"io.balena.image.kernel-abi-id="+kernelABI("vmlinuz"))
 	defer dockerExecMayFail(t, "rmi", "-f", tag)
 
 	service := uniqueName("live")

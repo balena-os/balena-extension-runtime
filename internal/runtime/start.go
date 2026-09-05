@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -12,7 +13,8 @@ import (
 	"github.com/opencontainers/runtime-spec/specs-go"
 )
 
-// Start signals the proxy to exit cleanly.
+// Start activates any kernel override the extension claims, then signals the
+// proxy to exit cleanly.
 // The container transitions to "stopped" — this is intentional for extensions,
 // which are overlay-only and don't run long-lived processes.
 func Start(logger *slog.Logger, containerID string) error {
@@ -30,8 +32,13 @@ func Start(logger *slog.Logger, containerID string) error {
 		return fmt.Errorf("failed to read spec: %w", err)
 	}
 
-	if _, err := oci.ResolveRootfs(spec, state.Bundle); err != nil {
+	rootfs, err := oci.ResolveRootfs(spec, state.Bundle)
+	if err != nil {
 		return fmt.Errorf("resolve rootfs: %w", err)
+	}
+
+	if err := activate(context.Background(), logger, containerID, rootfs, state.Annotations); err != nil {
+		return err
 	}
 
 	state.Status = specs.StateStopped

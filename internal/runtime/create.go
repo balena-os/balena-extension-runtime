@@ -53,7 +53,8 @@ func Create(ctx context.Context, logger *slog.Logger, containerID string, bundle
 	}
 
 	// Fabricate before the spawn: a failure leaves no proxy.
-	if _, err := fabricateBootVolume(ctx, logger, spec, stored, rootfs, containerID); err != nil {
+	bootVolume, err := fabricateBootVolume(ctx, logger, spec, stored, rootfs, containerID)
+	if err != nil {
 		return fmt.Errorf("fabricate boot volume: %w", err)
 	}
 
@@ -83,6 +84,11 @@ func Create(ctx context.Context, logger *slog.Logger, containerID string, bundle
 	state.Annotations = spec.Annotations
 	if err := oci.WriteState(state); err != nil {
 		return err
+	}
+	if bootVolume != "" {
+		if err := oci.WriteBootVolume(containerID, bootVolume); err != nil {
+			return err
+		}
 	}
 
 	if pidFile != "" {

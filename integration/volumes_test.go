@@ -3,6 +3,8 @@ package integration_test
 import (
 	"archive/tar"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -14,11 +16,35 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// kernelABI is what the label carries: the checksum of the kernel image,
+// which activation recomputes from the image's own /boot before it arms.
+func kernelABI(content string) string {
+	sum := sha256.Sum256([]byte(content))
+	return hex.EncodeToString(sum[:])
+}
+
+// The signal activation pairs the kernel-abi-id label with. The build never
+// produces one without the other, so neither does this fixture.
+const moduleSymvers = "usr/lib/modules/6.6.20-integration/Module.symvers"
+
 // buildExtensionImageWithContent imports an image whose rootfs holds the given
 // files, so the runtime has something real to copy into a fabricated volume.
 // Paths are relative to the rootfs, for example "boot/kernel".
+//
+// An image claiming a kernel ABI gets a module tree unless the caller laid one
+// down itself: activation declines a kernel override that ships no drivers, so
+// without it every fixture below would exercise the refusal instead.
 func buildExtensionImageWithContent(t *testing.T, tag string, files map[string]string, extraLabels ...string) {
 	t.Helper()
+
+	if claimsKernelABI(extraLabels) && !shipsModules(files) {
+		withModules := make(map[string]string, len(files)+1)
+		for path, content := range files {
+			withModules[path] = content
+		}
+		withModules[moduleSymvers] = ""
+		files = withModules
+	}
 
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
@@ -46,6 +72,24 @@ func buildExtensionImageWithContent(t *testing.T, tag string, files map[string]s
 	if err != nil {
 		t.Fatalf("buildExtensionImageWithContent(%s): %v\n%s", tag, err, out)
 	}
+}
+
+func claimsKernelABI(labels []string) bool {
+	for _, l := range labels {
+		if strings.HasPrefix(l, "io.balena.image.kernel-abi-id=") {
+			return true
+		}
+	}
+	return false
+}
+
+func shipsModules(files map[string]string) bool {
+	for path := range files {
+		if strings.HasSuffix(path, "/Module.symvers") {
+			return true
+		}
+	}
+	return false
 }
 
 // runExtension creates and runs a container through the extension runtime,
@@ -102,7 +146,7 @@ func TestFabricate_KernelOverride(t *testing.T) {
 	tag := uniqueName("ext-kernel")
 	buildExtensionImageWithContent(t, tag,
 		map[string]string{"boot/kernel": "vmlinuz", "boot/dtb/board.dtb": "fdt"},
-		"io.balena.image.kernel-abi-id=6.6.20-integration",
+		"io.balena.image.kernel-abi-id="+kernelABI("vmlinuz"),
 		"io.balena.image.kernel-version=6.6.20")
 	defer dockerExecMayFail(t, "rmi", "-f", tag)
 
@@ -121,13 +165,11 @@ func TestFabricate_KernelOverride(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "fdt", string(nested))
 
-	// The image labels are what the commit sweep applies its staleness
-	// predicate to, so a volume without them would never be collected. They
-	// are all the volume carries: everything that has to reach the volume
-	// re-derives its name, so no bookkeeping label has to survive on it.
+	// Cleanup and the supervisor read only the class label.
+	// The other image labels are for operators.
 	got := volumeLabels(t, name)
 	assert.Equal(t, "overlay", got["io.balena.image.class"])
-	assert.Equal(t, "6.6.20-integration", got["io.balena.image.kernel-abi-id"])
+	assert.Equal(t, kernelABI("vmlinuz"), got["io.balena.image.kernel-abi-id"])
 	assert.Equal(t, "6.6.20", got["io.balena.image.kernel-version"])
 	assert.NotContains(t, got, "io.balena.service-name",
 		"only image labels are copied; the deployment label is not one")
@@ -163,7 +205,7 @@ func TestFabricate_Idempotent(t *testing.T) {
 	tag := uniqueName("ext-again")
 	buildExtensionImageWithContent(t, tag,
 		map[string]string{"boot/kernel": "vmlinuz"},
-		"io.balena.image.kernel-abi-id=6.6.20-integration")
+		"io.balena.image.kernel-abi-id="+kernelABI("vmlinuz"))
 	defer dockerExecMayFail(t, "rmi", "-f", tag)
 
 	service := uniqueName("idempotent")
@@ -200,7 +242,7 @@ func TestFabricate_FoundByDerivedName(t *testing.T) {
 	tag := uniqueName("ext-identity")
 	buildExtensionImageWithContent(t, tag,
 		map[string]string{"boot/kernel": "vmlinuz"},
-		"io.balena.image.kernel-abi-id=6.6.20-identity")
+		"io.balena.image.kernel-abi-id="+kernelABI("vmlinuz"))
 	defer dockerExecMayFail(t, "rmi", "-f", tag)
 
 	service := uniqueName("kernel-modules")
@@ -208,12 +250,11 @@ func TestFabricate_FoundByDerivedName(t *testing.T) {
 	name := "ext_" + service + "_" + imageDigest12(t, id) + "_boot"
 	defer dockerExecMayFail(t, "volume", "rm", "-f", name)
 
-	// A second extension, so a lookup that matched too broadly would show up
-	// here rather than passing on a single-volume device.
+	// A second extension catches a too-broad lookup.
 	otherTag := uniqueName("ext-other")
 	buildExtensionImageWithContent(t, otherTag,
 		map[string]string{"boot/kernel": "other"},
-		"io.balena.image.kernel-abi-id=6.6.20-other")
+		"io.balena.image.kernel-abi-id="+kernelABI("other"))
 	defer dockerExecMayFail(t, "rmi", "-f", otherTag)
 	otherService := uniqueName("other-modules")
 	otherID := runExtension(t, otherTag, otherService)
@@ -222,8 +263,7 @@ func TestFabricate_FoundByDerivedName(t *testing.T) {
 
 	require.NotEqual(t, name, otherName, "two deployments must not share a volume")
 
-	// The derived name is what the daemon resolves, and it reaches this
-	// extension's kernel rather than the other's.
+	// The derived name reaches this extension's kernel.
 	content, err := os.ReadFile(filepath.Join(volumeMountpoint(t, name), "kernel"))
 	require.NoError(t, err)
 	assert.Equal(t, "vmlinuz", string(content))
