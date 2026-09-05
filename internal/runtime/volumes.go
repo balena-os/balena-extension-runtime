@@ -38,8 +38,8 @@ var createVolume = func(ctx context.Context, name string, volumeLabels map[strin
 var withOperationLock = manager.WithOperationLock
 
 // fabricateBootVolume creates and fills the /boot volume of a kernel
-// override, returning its host path. A userspace-only extension gets "" and
-// no engine call.
+// override, returning its host path, which create records and activate
+// reads at start. A userspace-only extension gets "" and no engine call.
 //
 // The volume is never attached to the container.
 func fabricateBootVolume(ctx context.Context, logger *slog.Logger, spec *specs.Spec, stored oci.StoredConfig, rootfs, containerID string) (string, error) {
