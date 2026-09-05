@@ -30,6 +30,35 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
+const (
+	testKernelRelease = "6.6.20-v8"
+	testOSVersion     = "2.119.0"
+)
+
+// runningSystem points the three host fact readers at files under t.TempDir(),
+// so a test judges a running system it owns rather than the test host. Only
+// the cmdline varies between callers.
+func runningSystem(t *testing.T, cmdline string) {
+	t.Helper()
+
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+		return path
+	}
+
+	prevKernel, prevCmdline, prevOSRelease := procKernelRelease, procCmdline, osReleasePath
+	procKernelRelease = write("osrelease", testKernelRelease+"\n")
+	procCmdline = write("cmdline", cmdline+"\n")
+	osReleasePath = write("os-release", `VERSION_ID="`+testOSVersion+`"`+"\n")
+	t.Cleanup(func() {
+		procKernelRelease, procCmdline, osReleasePath = prevKernel, prevCmdline, prevOSRelease
+	})
+}
+
 // loggerCapturing writes to buf so a test can assert on what a path reports
 // when it cannot do its job.
 func loggerCapturing(buf *bytes.Buffer) *slog.Logger {
@@ -160,8 +189,7 @@ type engineStub struct {
 	onInspect func(id string) string
 
 	// deployDuringVolumeList stands in for a deploy landing between the sweep's
-	// two snapshots. Like onInspect it is handed no reference to the stub, so it
-	// cannot re-enter the lock the handler already holds.
+	// two snapshots. Like onInspect it holds no reference to the stub.
 	deployDuringVolumeList func() []Container
 }
 

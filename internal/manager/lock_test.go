@@ -3,7 +3,6 @@ package manager
 import (
 	"context"
 	"os"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -198,19 +197,14 @@ func TestOperationLock_NoSelfDeadlock(t *testing.T) {
 		ImageID: "sha256:" + id,
 		Labels: overlayLabels(map[string]string{
 			"io.balena.image.kernel-abi-id": abi,
-			// Unsatisfiable against any real VERSION_ID, so the stale-OS
-			// pass reaches the removal.
+			// Unsatisfiable against the running system the test sets, so
+			// the stale-OS pass reaches the removal.
 			"io.balena.image.os-version": "9.9.*",
 		}),
 	}}
 	stub.Inspects[id] = inspectJSON(id, "exited", "", 0)
 	testEngineEnv(t, testServer(t, stub.handler()))
-
-	osr := filepath.Join(t.TempDir(), "os-release")
-	require.NoError(t, os.WriteFile(osr, []byte("VERSION_ID=\"2.119.0\"\n"), 0o644))
-	prev := osReleasePath
-	osReleasePath = osr
-	t.Cleanup(func() { osReleasePath = prev })
+	runningSystem(t, "console=tty1")
 
 	var err error
 	done := make(chan struct{})

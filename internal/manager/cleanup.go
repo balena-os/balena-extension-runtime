@@ -10,10 +10,16 @@ import (
 	"strings"
 
 	"github.com/balena-os/balena-extension-runtime/internal/labels"
+	"github.com/balena-os/hostapp"
 )
 
-// osReleasePath is the default path to /etc/os-release. Overridable in tests.
-var osReleasePath = "/etc/os-release"
+// The host files the running system's facts come from. Variables so tests can
+// redirect them.
+var (
+	osReleasePath     = "/etc/os-release"
+	procKernelRelease = "/proc/sys/kernel/osrelease"
+	procCmdline       = "/proc/cmdline"
+)
 
 // CleanupOpts configures what Cleanup removes.
 type CleanupOpts struct {
@@ -320,7 +326,7 @@ func readOSVersionFrom(path string) (string, error) {
 
 // runningKernelVersion returns the M.m.p portion of the running kernel.
 func runningKernelVersion() (string, error) {
-	data, err := os.ReadFile("/proc/sys/kernel/osrelease")
+	data, err := os.ReadFile(procKernelRelease)
 	if err != nil {
 		return "", fmt.Errorf("read kernel version: %w", err)
 	}
@@ -338,20 +344,9 @@ func runningKernelVersion() (string, error) {
 // kernel-abi-id against such a device fail their claim naturally through the
 // `stale` predicate.
 func runningKernelABIID() (string, error) {
-	data, err := os.ReadFile("/proc/cmdline")
+	data, err := os.ReadFile(procCmdline)
 	if err != nil {
-		return "", fmt.Errorf("read /proc/cmdline: %w", err)
+		return "", fmt.Errorf("read kernel cmdline: %w", err)
 	}
-	return parseKernelABIID(string(data)), nil
-}
-
-// parseKernelABIID extracts the balena_kernel_abi token value from a kernel
-// command line, or "" when absent.
-func parseKernelABIID(cmdline string) string {
-	for _, tok := range strings.Fields(cmdline) {
-		if v, ok := strings.CutPrefix(tok, "balena_kernel_abi="); ok {
-			return v
-		}
-	}
-	return ""
+	return hostapp.ParseHostKernelABIID(string(data)), nil
 }

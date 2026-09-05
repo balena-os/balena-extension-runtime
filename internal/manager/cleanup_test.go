@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/balena-os/balena-extension-runtime/internal/labels"
+	"github.com/balena-os/hostapp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -241,32 +242,6 @@ func TestReadOSVersion(t *testing.T) {
 	}
 }
 
-func TestParseKernelABIID(t *testing.T) {
-	tests := []struct {
-		name    string
-		cmdline string
-		want    string
-	}{
-		{"present", "console=tty1 balena_kernel_abi=0123abcd rootwait", "0123abcd"},
-		{"absent (stock kernel)", "console=tty1 rootwait", ""},
-		{"empty value", "balena_kernel_abi= rootwait", ""},
-		{"prefix of another token does not match", "not_balena_kernel_abi=x", ""},
-		// Real /proc/cmdline ends in a newline and often carries the token
-		// as the final field; Fields must swallow the trailing \n.
-		{"token last, trailing newline", "console=tty1 balena_kernel_abi=0123abcd\n", "0123abcd"},
-		// First match wins, matching mobynit's parser: a later duplicate
-		// must not override the initrd's first published value.
-		{"duplicate token keeps the first", "balena_kernel_abi=first balena_kernel_abi=second", "first"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := parseKernelABIID(tt.cmdline); got != tt.want {
-				t.Errorf("got %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
 // TestOsVersionMatch_MalformedPatternLogged asserts that a typo in the
 // os-version label is surfaced via logger.Warn instead of being silently
 // retained — so a malformed pattern doesn't cause images to accumulate
@@ -313,13 +288,12 @@ func TestCleanup_StaleOS_RetainsVolumeOfSurvivingContainer(t *testing.T) {
 		State:   "exited",
 		Labels: overlayLabels(map[string]string{
 			"io.balena.image.kernel-abi-id": "6.6.20-abc",
-			"io.balena.image.os-version":    "9.9.*", // never matches running -> stale
+			"io.balena.image.os-version":    "9.9.*", // does not match the running system -> stale
 			"io.balena.service-name":        "kernel-modules",
 		}),
 	}}
 	stub.Inspects[id] = inspectJSON(id, "exited", "", 0)
-	// The container removal fails, so the container is still on the device
-	// when the volume sweep runs.
+	// The container survives, so the volume stays claimed.
 	stub.RemoveContainerStatus = map[string]int{id: 500}
 
 	name := labels.VolumeName("kernel-modules", imageID)
@@ -328,12 +302,7 @@ func TestCleanup_StaleOS_RetainsVolumeOfSurvivingContainer(t *testing.T) {
 		Labels: overlayLabels(map[string]string{"io.balena.image.os-version": "9.9.*"}),
 	}}
 	testEngineEnv(t, testServer(t, stub.handler()))
-
-	osr := filepath.Join(t.TempDir(), "os-release")
-	require.NoError(t, os.WriteFile(osr, []byte(`VERSION_ID="2.119.0"`+"\n"), 0o644))
-	prev := osReleasePath
-	osReleasePath = osr
-	t.Cleanup(func() { osReleasePath = prev })
+	runningSystem(t, "console=tty1")
 
 	err := Cleanup(context.Background(), quietLogger(), CleanupOpts{PruneStaleOS: true})
 	require.Error(t, err, "the failed container removal must still be reported")
@@ -346,7 +315,7 @@ func TestCleanup_StaleOS_RetainsVolumeOfSurvivingContainer(t *testing.T) {
 
 // TestCleanup_StaleOS_CollectsVolumeOnceContainerIsGone is the other half:
 // nothing claims the volume after its container is removed, so the sweep takes
-// it. Without this the retention guard would simply leak every volume.
+// it. Without this the retention guard would leak every volume.
 func TestCleanup_StaleOS_CollectsVolumeOnceContainerIsGone(t *testing.T) {
 	const id = "aaaa000000000000"
 	const imageID = "sha256:42befc76f4f8aaaa"
@@ -370,12 +339,7 @@ func TestCleanup_StaleOS_CollectsVolumeOnceContainerIsGone(t *testing.T) {
 		Labels: overlayLabels(map[string]string{"io.balena.image.os-version": "9.9.*"}),
 	}}
 	testEngineEnv(t, testServer(t, stub.handler()))
-
-	osr := filepath.Join(t.TempDir(), "os-release")
-	require.NoError(t, os.WriteFile(osr, []byte(`VERSION_ID="2.119.0"`+"\n"), 0o644))
-	prev := osReleasePath
-	osReleasePath = osr
-	t.Cleanup(func() { osReleasePath = prev })
+	runningSystem(t, "console=tty1")
 
 	require.NoError(t, Cleanup(context.Background(), quietLogger(), CleanupOpts{PruneStaleOS: true}))
 
@@ -383,6 +347,78 @@ func TestCleanup_StaleOS_CollectsVolumeOnceContainerIsGone(t *testing.T) {
 	defer stub.mu.Unlock()
 	assert.Contains(t, stub.RemovedContainers, id)
 	assert.Contains(t, stub.RemovedVolumes, name)
+}
+
+// TestCleanup_StaleOS_JudgesTheRunningSystem pins which host files decide the
+// stale-OS pass. Every row shares one fixture and differs only in the kernel
+// cmdline, so the ABI the cmdline publishes is the only variable.
+func TestCleanup_StaleOS_JudgesTheRunningSystem(t *testing.T) {
+	const (
+		id      = "abiclaimant00000"
+		imageID = "sha256:42befc76f4f8aaaa"
+		abi     = "a1b2c3"
+	)
+	abiToken := func(v string) string {
+		return "console=tty1 " + hostapp.CMDLINE_KERNEL_ABI + "=" + v
+	}
+
+	cases := []struct {
+		name    string
+		cmdline string
+		// unreadable points procCmdline at a missing file.
+		unreadable bool
+		wantErr    bool
+		wantKept   bool
+	}{
+		{name: "every claim matches", cmdline: abiToken(abi), wantKept: true},
+		{name: "ABI differs", cmdline: abiToken("other")},
+		{name: "stock boot", cmdline: "console=tty1"},
+		{name: "cmdline unreadable", cmdline: "console=tty1", unreadable: true, wantErr: true, wantKept: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			extLabels := overlayLabels(map[string]string{
+				"io.balena.image.kernel-abi-id":  abi,
+				"io.balena.image.kernel-version": "6.6.20",
+				"io.balena.image.os-version":     "2.119.*",
+			})
+
+			stub := newEngineStub()
+			stub.Containers = []Container{{
+				ID:      id,
+				ImageID: imageID,
+				State:   "exited",
+				Labels:  extLabels,
+			}}
+			stub.Images = []Image{{ID: imageID, Labels: extLabels}}
+			// A clean inspect keeps the dead-container pass away.
+			stub.Inspects[id] = inspectJSON(id, "exited", "", 0)
+			testEngineEnv(t, testServer(t, stub.handler()))
+
+			runningSystem(t, tc.cmdline)
+			if tc.unreadable {
+				procCmdline = filepath.Join(t.TempDir(), "absent")
+			}
+
+			err := Cleanup(context.Background(), quietLogger(), CleanupOpts{PruneStaleOS: true})
+			if tc.wantErr {
+				require.Error(t, err, "a host fact the sweep cannot read must fail it")
+			} else {
+				require.NoError(t, err)
+			}
+
+			stub.mu.Lock()
+			defer stub.mu.Unlock()
+			if tc.wantKept {
+				assert.Empty(t, stub.RemovedContainers)
+				assert.Empty(t, stub.RemovedImages)
+				return
+			}
+			assert.Equal(t, []string{id}, stub.RemovedContainers)
+			assert.Equal(t, []string{imageID}, stub.RemovedImages)
+		})
+	}
 }
 
 // One walk serves both predicates, and a container the list already reports
@@ -501,7 +537,7 @@ func TestCleanup_VolumeSnapshotPrecedesTheClaimQuery(t *testing.T) {
 	name := labels.VolumeName("kernel-modules", imageID)
 
 	stub := newEngineStub()
-	// A redeploy of the same service and image: the volume is already on disk.
+	// A redeploy: the volume is already on disk.
 	stub.Volumes = []Volume{{Name: name, Labels: overlayLabels(nil)}}
 	stub.deployDuringVolumeList = func() []Container {
 		return []Container{{
