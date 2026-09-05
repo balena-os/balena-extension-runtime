@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/balena-os/balena-extension-runtime/internal/manager"
+	"github.com/balena-os/balena-extension-runtime/internal/validate"
 	"github.com/balena-os/balena-extension-runtime/internal/version"
 	"github.com/spf13/cobra"
 )
@@ -36,6 +38,56 @@ var cleanupCmd = &cobra.Command{
 	},
 }
 
+// The healthcheck waits, in seconds. Flags rather than environment, so the
+// unit line shows what a device is waiting for.
+var (
+	settleSeconds  uint
+	retrySeconds   uint
+	healthAttempts uint
+)
+
+var validateCmd = &cobra.Command{
+	Use:   "validate",
+	Short: "Judge a kernel override armed outside a host OS update",
+	Long: "Forget every override record no deployed extension claims, then " +
+		"commit, reject or leave pending the override this boot armed. " +
+		"A device with no boot environment block has no override axis and " +
+		"exits zero.",
+	Args: cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return validate.Run(cmd.Context(), logger, validate.Options{
+			Settle:   time.Duration(settleSeconds) * time.Second,
+			Retry:    time.Duration(retrySeconds) * time.Second,
+			Attempts: int(healthAttempts),
+		})
+	},
+}
+
+var hupCmd = &cobra.Command{
+	Use:   "hup",
+	Short: "Conclude a kernel override window a host OS update owns",
+}
+
+// Neither subcommand takes a slot: each derives its own, and writing the
+// wrong slot's committed value is how a proven kernel gets retired.
+var hupCommitCmd = &cobra.Command{
+	Use:   "commit",
+	Short: "Record the running kernel as the running slot's proven override",
+	Args:  cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return validate.HUPCommit(cmd.Context(), logger)
+	},
+}
+
+var hupRejectCmd = &cobra.Command{
+	Use:   "reject",
+	Short: "Undo the active override in favour of the slot being rolled into",
+	Args:  cobra.NoArgs,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return validate.HUPReject(cmd.Context(), logger)
+	},
+}
+
 func init() {
 	managerRootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "info",
 		"Set the logging level (debug, info, warn, error)")
@@ -44,7 +96,15 @@ func init() {
 			"kernel-abi-id labels mismatch the running kernel, and extension "+
 			"images whose io.balena.image.os-version label doesn't match "+
 			"/etc/os-release VERSION_ID.")
-	managerRootCmd.AddCommand(cleanupCmd)
+	validateCmd.Flags().UintVar(&settleSeconds, "settle", 60,
+		"Seconds to wait before the first healthcheck")
+	validateCmd.Flags().UintVar(&retrySeconds, "retry", 60,
+		"Seconds to wait between healthcheck attempts")
+	validateCmd.Flags().UintVar(&healthAttempts, "attempts", 15,
+		"Healthcheck attempts before the override is rejected")
+
+	hupCmd.AddCommand(hupCommitCmd, hupRejectCmd)
+	managerRootCmd.AddCommand(cleanupCmd, validateCmd, hupCmd)
 }
 
 func ExecuteManager(ctx context.Context) error {

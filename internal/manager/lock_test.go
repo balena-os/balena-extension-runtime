@@ -102,8 +102,8 @@ func holdFileLock(t *testing.T) func() {
 }
 
 // TestOperationLock_WaitsForAnotherHolderOfTheFileLock covers what the
-// in-process mutex cannot: the boot cleanup unit and the rollback shell's
-// removal run in separate processes, so only the file lock keeps them apart.
+// in-process mutex cannot: the engine execs the runtime as its own process,
+// so only the file lock keeps it apart from a sweeping manager.
 func TestOperationLock_WaitsForAnotherHolderOfTheFileLock(t *testing.T) {
 	stub := deadContainerStub(t)
 	release := holdFileLock(t)

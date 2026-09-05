@@ -3,7 +3,7 @@ module github.com/balena-os/balena-extension-runtime
 go 1.22
 
 require (
-	github.com/balena-os/hostapp v1.1.1-0.20260905151957-51eb003728fe
+	github.com/balena-os/hostapp v1.1.1-0.20260905180043-cf713bce9eea
 	github.com/opencontainers/runtime-spec v1.2.0
 	github.com/spf13/cobra v1.10.2
 	github.com/stretchr/testify v1.11.1
