@@ -56,8 +56,22 @@ var isMounted = mounts.IsMounted
 // ErrNotMounted is a boot defect, so callers classify it as retryable.
 var ErrNotMounted = errors.New("the boot partition is not mounted")
 
+// ErrNoBlock separates a device with no override axis from an unreadable
+// block. A u-boot device keeps its bootloader environment elsewhere.
+var ErrNoBlock = errors.New("no bootenv block on this device")
+
 // Path is the environment block's location on this build.
 func Path() string { return filepath.Join(bootMount, "bootenv") }
+
+// SetBootMount points the package at another mountpoint and returns a
+// restore. The build links the device's value in through -X, so this is how
+// a test in another package reaches a block it can write.
+func SetBootMount(path string) func() {
+	prevMount, prevMounted := bootMount, isMounted
+	bootMount = path
+	isMounted = func(p string) (bool, error) { return p == path, nil }
+	return func() { bootMount, isMounted = prevMount, prevMounted }
+}
 
 // Env is a block's entries, in block order, as grub keeps them.
 type Env struct {
@@ -160,46 +174,90 @@ func (e *Env) Marshal() ([]byte, error) {
 	return out, nil
 }
 
-// Update rewrites the block in place under an exclusive lock on the block
-// itself, which is the lock os-helpers-bootenv's bootenv_set takes.
-func Update(fn func(*Env) error) error {
+// openBlock opens the block under the given flock mode. The mount check is
+// what separates an unmounted partition from a device that has no block.
+func openBlock(flag, how int) (*os.File, error) {
 	mounted, err := isMounted(bootMount)
 	if err != nil {
-		return fmt.Errorf("checking whether %s is mounted: %w", bootMount, err)
+		return nil, fmt.Errorf("checking whether %s is mounted: %w", bootMount, err)
 	}
 	if !mounted {
-		return fmt.Errorf("%w: %s", ErrNotMounted, bootMount)
+		return nil, fmt.Errorf("%w: %s", ErrNotMounted, bootMount)
 	}
 
 	path := Path()
-	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	f, err := os.OpenFile(path, flag, 0)
 	if err != nil {
-		return fmt.Errorf("open %s: %w", path, err)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("%w: %s", ErrNoBlock, path)
+		}
+		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
-	defer func() { _ = f.Close() }()
-
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		return fmt.Errorf("lock %s: %w", path, err)
+	if err := syscall.Flock(int(f.Fd()), how); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("lock %s: %w", path, err)
 	}
-	defer func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }()
+	return f, nil
+}
 
+// readBlock parses the block behind an already locked descriptor.
+func readBlock(f *os.File) (*Env, error) {
+	path := f.Name()
 	// Under the lock, so the size cannot change.
 	info, err := f.Stat()
 	if err != nil {
-		return fmt.Errorf("stat %s: %w", path, err)
+		return nil, fmt.Errorf("stat %s: %w", path, err)
 	}
 	if info.Size() < int64(len(signature)) || info.Size() > maxBlockSize {
-		return fmt.Errorf("bootenv block %s is %d bytes", path, info.Size())
+		return nil, fmt.Errorf("bootenv block %s is %d bytes", path, info.Size())
 	}
 	block := make([]byte, info.Size())
 	if _, err := io.ReadFull(f, block); err != nil {
-		return fmt.Errorf("read %s: %w", path, err)
+		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	env, err := Parse(block)
 	if err != nil {
-		return fmt.Errorf("parse %s: %w", path, err)
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+	return env, nil
+}
+
+// Read parses the block under a shared lock, writing nothing. An ordinary
+// boot reaches the block through this and never opens it for writing.
+func Read() (*Env, error) {
+	f, err := openBlock(os.O_RDONLY, syscall.LOCK_SH)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	defer func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }()
+
+	return readBlock(f)
+}
+
+// errNoChange, returned by an Update closure, leaves the block untouched.
+// A verdict whose window moved must not rewrite even identical bytes.
+var errNoChange = errors.New("bootenv unchanged")
+
+// Update rewrites the block in place under an exclusive lock on the block
+// itself, which is the lock os-helpers-bootenv's bootenv_set takes.
+func Update(fn func(*Env) error) error {
+	f, err := openBlock(os.O_RDWR, syscall.LOCK_EX)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	defer func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }()
+
+	path := f.Name()
+	env, err := readBlock(f)
+	if err != nil {
+		return err
 	}
 	if err := fn(env); err != nil {
+		if errors.Is(err, errNoChange) {
+			return nil
+		}
 		return err
 	}
 	out, err := env.Marshal()
