@@ -1,7 +1,6 @@
 package labels
 
 import (
-	"sort"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -55,38 +54,4 @@ func TestValidate(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestToEnv(t *testing.T) {
-	// ToEnv must forward every io.balena.image.* annotation as
-	// EXTENSION_IMAGE_* regardless of whether the runtime has a named
-	// constant for it. Include an arbitrary-name annotation to prove the
-	// forwarding is prefix-based, not a fixed allowlist.
-	annotations := map[string]string{
-		Class:                          ClassOverlay,
-		KernelABIID:                    "sha256:abc123",
-		KernelVersion:                  "6.12.61",
-		OSVersion:                      "2.119.*",
-		Prefix + "future-thing":        "x",
-		"unrelated":                    "ignored",
-	}
-
-	env := ToEnv(annotations)
-	sort.Strings(env)
-
-	expected := []string{
-		"EXTENSION_IMAGE_CLASS=overlay",
-		"EXTENSION_IMAGE_FUTURE_THING=x",
-		"EXTENSION_IMAGE_KERNEL_ABI_ID=sha256:abc123",
-		"EXTENSION_IMAGE_KERNEL_VERSION=6.12.61",
-		"EXTENSION_IMAGE_OS_VERSION=2.119.*",
-	}
-	sort.Strings(expected)
-
-	assert.Equal(t, expected, env)
-}
-
-func TestToEnvEmpty(t *testing.T) {
-	env := ToEnv(map[string]string{"other": "value"})
-	assert.Empty(t, env)
 }

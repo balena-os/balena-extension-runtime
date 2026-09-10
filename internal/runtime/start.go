@@ -7,13 +7,12 @@ import (
 	"os"
 	"syscall"
 
-	"github.com/balena-os/balena-extension-runtime/internal/hooks"
 	"github.com/balena-os/balena-extension-runtime/internal/oci"
 	"github.com/balena-os/balena-extension-runtime/internal/proxy"
 	"github.com/opencontainers/runtime-spec/specs-go"
 )
 
-// Start runs the start hook and signals the proxy to exit cleanly.
+// Start signals the proxy to exit cleanly.
 // The container transitions to "stopped" — this is intentional for extensions,
 // which are overlay-only and don't run long-lived processes.
 func Start(logger *slog.Logger, containerID string) error {
@@ -31,13 +30,8 @@ func Start(logger *slog.Logger, containerID string) error {
 		return fmt.Errorf("failed to read spec: %w", err)
 	}
 
-	rootfs, err := oci.ResolveRootfs(spec, state.Bundle)
-	if err != nil {
+	if _, err := oci.ResolveRootfs(spec, state.Bundle); err != nil {
 		return fmt.Errorf("resolve rootfs: %w", err)
-	}
-
-	if err := hooks.ExecuteIfPresent(logger, rootfs, "hooks/start", state.Annotations, spec.Mounts); err != nil {
-		return err
 	}
 
 	state.Status = specs.StateStopped
