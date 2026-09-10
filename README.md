@@ -40,18 +40,18 @@ make test-integration
 
 The runtime follows the standard OCI container lifecycle:
 
-1. `create` — Reads `config.json`, validates extension labels, runs the
-   `hooks/create` hook, spawns a proxy process, and writes OCI state
-2. `start` — Runs the `hooks/start` hook, signals the proxy to exit cleanly
-   (SIGUSR1), and transitions the container to `stopped`
+1. `create` — Reads `config.json`, validates extension labels, spawns a proxy
+   process, and writes OCI state
+2. `start` — Signals the proxy to exit cleanly (SIGUSR1) and transitions the
+   container to `stopped`
 3. `kill` — Sends a signal to the proxy process
-4. `delete` — Runs the `hooks/delete` hook and removes runtime state
+4. `delete` — Removes runtime state
 5. `state` — Returns OCI state JSON to stdout
 
 ### Why extensions exit immediately
 
-Unlike traditional runtimes, extensions don't run persistent processes. They
-apply overlay filesystem changes during their hooks and then exit. The `start`
+Unlike traditional runtimes, extensions don't run persistent processes. Their
+content is applied as an overlay at boot, so there is nothing to run. The `start`
 command intentionally transitions the container to `stopped` — this is by
 design.
 
@@ -76,20 +76,9 @@ Extensions are identified by OCI annotations (image labels):
 | `io.balena.image.os-version`      | no       | HUP-commit retention predicate: comma-separated shell globs matched against `/etc/os-release` `VERSION_ID` |
 
 The runtime acts on the labels above. Any other annotation under the
-`io.balena.image.*` prefix is opaque to the runtime but is still forwarded to
-hooks as an environment variable (see below).
+`io.balena.image.*` prefix is opaque to the runtime.
 
-### Extension hooks
-
-Extensions can ship executable scripts at `<rootfs>/hooks/{create,start,delete}`.
-Hooks receive the following environment variables:
-
-- `EXTENSION_ROOTFS` — absolute path to the extension rootfs
-- `EXTENSION_IMAGE_*` — every annotation under the `io.balena.image.*` prefix
-  is forwarded as `EXTENSION_IMAGE_<NAME>`, with dashes converted to
-  underscores and uppercased (e.g., `io.balena.image.kernel-abi-id` becomes
-  `EXTENSION_IMAGE_KERNEL_ABI_ID`). The forwarding is prefix-based, so custom
-  or future labels are available to hooks without runtime changes.
+The runtime never executes content from an extension image.
 
 ### State management
 

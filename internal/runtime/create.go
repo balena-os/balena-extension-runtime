@@ -7,7 +7,6 @@ import (
 	"os"
 	"time"
 
-	"github.com/balena-os/balena-extension-runtime/internal/hooks"
 	"github.com/balena-os/balena-extension-runtime/internal/labels"
 	"github.com/balena-os/balena-extension-runtime/internal/oci"
 	"github.com/balena-os/balena-extension-runtime/internal/proxy"
@@ -27,9 +26,9 @@ var (
 	proxyStop       = proxy.Stop
 )
 
-// Create validates the extension, runs the create hook, spawns the proxy,
-// and writes the initial OCI state. ctx bounds the proxy spawn and lets the
-// caller (typically containerd via SIGTERM) cancel an in-flight create.
+// Create validates the extension, spawns the proxy, and writes the initial
+// OCI state. ctx bounds the proxy spawn and lets the caller (typically
+// containerd via SIGTERM) cancel an in-flight create.
 func Create(ctx context.Context, logger *slog.Logger, containerID string, bundlePath string, pidFile string) error {
 	bundlePath, err := oci.NormalizeBundlePath(bundlePath)
 	if err != nil {
@@ -45,17 +44,12 @@ func Create(ctx context.Context, logger *slog.Logger, containerID string, bundle
 	// Fall back to reading them from the Docker container store.
 	oci.EnrichAnnotations(logger, spec, containerID)
 
-	rootfs, err := oci.ResolveRootfs(spec, bundlePath)
-	if err != nil {
+	if _, err := oci.ResolveRootfs(spec, bundlePath); err != nil {
 		return fmt.Errorf("resolve rootfs: %w", err)
 	}
 
 	if err := labels.Validate(spec.Annotations); err != nil {
 		return fmt.Errorf("invalid extension: %w", err)
-	}
-
-	if err := hooks.ExecuteIfPresent(logger, rootfs, "hooks/create", spec.Annotations, spec.Mounts); err != nil {
-		return err
 	}
 
 	spawnCtx, cancel := context.WithTimeout(ctx, proxySpawnTimeout)

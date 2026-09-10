@@ -1,10 +1,6 @@
 package labels
 
-import (
-	"fmt"
-	"sort"
-	"strings"
-)
+import "fmt"
 
 const (
 	Prefix = "io.balena.image."
@@ -38,25 +34,4 @@ func Validate(annotations map[string]string) error {
 		return fmt.Errorf("unsupported %s=%q, must be %q", Class, class, ClassOverlay)
 	}
 	return nil
-}
-
-// ToEnv converts io.balena.image.* annotations to environment variables.
-// "io.balena.image.class" becomes "EXTENSION_IMAGE_CLASS=overlay".
-// Output is sorted by annotation key for deterministic ordering.
-func ToEnv(annotations map[string]string) []string {
-	keys := make([]string, 0, len(annotations))
-	for k := range annotations {
-		if strings.HasPrefix(k, Prefix) {
-			keys = append(keys, k)
-		}
-	}
-	sort.Strings(keys)
-
-	env := make([]string, 0, len(keys))
-	for _, k := range keys {
-		suffix := strings.TrimPrefix(k, Prefix)
-		name := "EXTENSION_IMAGE_" + strings.ToUpper(strings.ReplaceAll(suffix, "-", "_"))
-		env = append(env, name+"="+annotations[k])
-	}
-	return env
 }
