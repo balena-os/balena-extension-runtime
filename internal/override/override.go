@@ -28,6 +28,11 @@ var (
 	// One link per published kernel, read by the initramfs.
 	BootByABIDir = "/mnt/data/boot-by-abi"
 
+	// The engine's root on the data partition. /var/lib/docker is a bind of
+	// it, so a path through the bind resolves in the running OS and not in
+	// the initramfs. A published link reaches a volume through this path.
+	DataEngineRoot = "/mnt/data/docker"
+
 	// The VPN reachability the validator compares against. openvpn's
 	// upscript and rollback-tests both spell it /run.
 	VPNActiveMarker = "/run/openvpn/vpn_status/active"
@@ -214,6 +219,25 @@ func ListPublished() ([]string, error) {
 		names = append(names, e.Name())
 	}
 	return names, nil
+}
+
+// KernelTarget returns what the boot-by-abi link of a kernel points at: a
+// kernel image inside a fabricated volume, named relative to BootByABIDir.
+// Moving either host path moves the target with it.
+//
+// volumeRelDir is the volume's data directory relative to the engine's root.
+// The engine's layout is oci.VolumeRelDir's to spell. This package holds the
+// rest, because the rest is a path it publishes.
+func KernelTarget(volumeRelDir, kernel string) (string, error) {
+	if kernel == "" || kernel != filepath.Base(kernel) || kernel == "." || kernel == ".." {
+		return "", fmt.Errorf("kernel image name %q is not a bare file name", kernel)
+	}
+	target, err := filepath.Rel(BootByABIDir,
+		filepath.Join(DataEngineRoot, volumeRelDir, kernel))
+	if err != nil {
+		return "", fmt.Errorf("target for kernel %s: %w", kernel, err)
+	}
+	return target, nil
 }
 
 // KernelLink is where abi's kernel is published. An ABI names a file, so a

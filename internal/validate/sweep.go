@@ -12,11 +12,6 @@ import (
 	"github.com/balena-os/hostapp"
 )
 
-// The on-disk container store, not the engine's list: this unit runs with the
-// engine possibly down, and its claim set has to be the one the initramfs
-// acts on. A variable so tests can redirect it.
-var dataRoot = "/mnt/data/docker"
-
 // Test seam over the claim query.
 var claimedABIs = hostapp.ClaimedKernelABIs
 
@@ -27,12 +22,15 @@ var claimedABIs = hostapp.ClaimedKernelABIs
 // query, so a deploy landing mid-sweep is never judged. The query runs inside
 // the lock the runtime's create takes, which is what covers a redeploy of an
 // ABI the set already named.
+//
+// The block is written before the links: a link no record names is collected
+// by the next sweep, where the opposite order costs a boot.
 func sweep(ctx context.Context, logger *slog.Logger, env *bootenv.Env) (bool, error) {
 	recorded, err := recordedABIs(env)
 	if err != nil {
 		return false, err
 	}
-	// Cost control: no record means no store read and no lock.
+	// No record: no store read and no lock.
 	if len(recorded) == 0 {
 		return false, nil
 	}
@@ -46,8 +44,7 @@ func sweep(ctx context.Context, logger *slog.Logger, env *bootenv.Env) (bool, er
 		logger.Info("no deployed extension claims these kernel overrides; forgetting them",
 			"abis", unclaimed)
 
-		// One write for N ABIs. The block first: a link no record names is
-		// collected by the next sweep, where the opposite order costs a boot.
+		// One write for N ABIs.
 		armCleared, err := bootenv.Forget(unclaimed)
 		if err != nil {
 			return fmt.Errorf("forget unclaimed kernel overrides: %w", err)
@@ -74,8 +71,13 @@ func sweep(ctx context.Context, logger *slog.Logger, env *bootenv.Env) (bool, er
 // A failed query yields nothing to sweep. "Cannot tell" must never read as an
 // empty claim set, which would forget every ABI on a data partition that is
 // not yet populated.
+//
+// The claim set comes from the on-disk container store rather than the engine's
+// list: this unit runs with the engine possibly down, and the set has to be the
+// one the initramfs acts on.
 func unclaimedABIs(logger *slog.Logger, recorded []string) []string {
-	claimed, err := claimedABIs(dataRoot)
+	// The on-disk store, not the engine's list.
+	claimed, err := claimedABIs(override.DataEngineRoot)
 	if err != nil {
 		logger.Warn("cannot determine the deployed extensions; leaving the override records alone",
 			"err", err)

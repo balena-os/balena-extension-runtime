@@ -13,13 +13,11 @@ import (
 	"github.com/balena-os/balena-extension-runtime/internal/labels"
 	"github.com/balena-os/balena-extension-runtime/internal/manager"
 	"github.com/balena-os/balena-extension-runtime/internal/oci"
-	"github.com/opencontainers/runtime-spec/specs-go"
 )
 
-// fabricatingMarker names the file written into a volume for the duration of
-// a fill. A kill mid-copy leaves a volume that is neither empty nor complete,
-// and emptiness alone cannot tell that apart from a finished fill; the marker
-// is what makes the fill restartable.
+// fabricatingMarker names the file written into a volume during a fill. A kill
+// mid-copy leaves a volume that is neither empty nor complete, and emptiness
+// cannot tell that apart from a finished fill.
 const fabricatingMarker = ".fabricating"
 
 // bootDest is the only destination the runtime fabricates. It is structural,
@@ -28,8 +26,7 @@ const fabricatingMarker = ".fabricating"
 // the kernel from it.
 const bootDest = "/boot"
 
-// createVolume is a test seam, following the package-level function var
-// convention used for the proxy.
+// createVolume is a test seam.
 var createVolume = func(ctx context.Context, name string, volumeLabels map[string]string) (*manager.Volume, error) {
 	return manager.NewEngine().CreateVolume(ctx, name, volumeLabels)
 }
@@ -37,102 +34,86 @@ var createVolume = func(ctx context.Context, name string, volumeLabels map[strin
 // withOperationLock is a test seam; the real lock lives in /run.
 var withOperationLock = manager.WithOperationLock
 
-// fabricateBootVolume creates and fills the /boot volume of a kernel
-// override, returning its host path, which create records and activate
-// reads at start. A userspace-only extension gets "" and no engine call.
+// fabricateBootVolume creates and fills the /boot volume of a kernel override.
+// It returns the volume's name, which create records and activate reads at
+// start. A userspace-only extension gets "" and no engine call. The volume is
+// never attached to the container.
 //
-// The volume is never attached to the container.
-func fabricateBootVolume(ctx context.Context, logger *slog.Logger, spec *specs.Spec, stored oci.StoredConfig, rootfs, containerID string) (string, error) {
-	identity := stored.Labels
-	if len(identity) == 0 {
-		identity = spec.Annotations
+// The lock covers create-or-get and the fill because create-or-get adopts an
+// existing volume. Cleanup holds the lock across its container list and its
+// volume removals, so without this a boot-time sweep can remove that volume
+// between the adopt and start's publish, and activation then fails on a kernel
+// that is not there. The lock need not extend over start: the container record
+// is already in the store, so a sweep listing containers after this claims the
+// volume.
+func fabricateBootVolume(ctx context.Context, logger *slog.Logger, id oci.Identity, rootfs, containerID string) (string, error) {
+	name, err := labels.BootVolume(id.Labels, containerID, id.ImageID)
+	if err != nil || name == "" {
+		return "", err
 	}
-	if !labels.FabricatesVolume(identity) {
-		return "", nil
-	}
-	if stored.ImageID == "" {
-		return "", fmt.Errorf("the container store gave no image id for %s, so the volume cannot be named", containerID)
+	dataDir, err := oci.VolumeDataDir(name)
+	if err != nil {
+		return "", err
 	}
 
-	service, fellBack := labels.ResolveServiceName(identity, containerID)
-	if fellBack {
-		// Worth a line: it makes the volume name unpredictable to anyone
-		// reading it later.
-		logger.Info("no service name label, naming the volume after the container id",
-			"label", labels.ServiceName, "service", service)
-	}
-	name := labels.VolumeName(service, stored.ImageID)
-
-	// Create-or-get adopts an existing volume, so without the lock cleanup
-	// holds across its container list and its volume removals, a boot-time
-	// sweep can remove that volume between the adopt and start's publish,
-	// and activation then fails on a kernel that is not there.
-	//
-	// It need not extend over start: the container record is already in the
-	// store by the time the runtime is invoked, so a sweep listing
-	// containers after this returns claims the volume.
-	var mountpoint string
+	// The lock covers the adopt; see above.
 	if err := withOperationLock(ctx, func() error {
-		volume, err := createVolume(ctx, name, labels.Image(identity))
-		if err != nil {
+		if _, err := createVolume(ctx, name, labels.Image(id.Labels)); err != nil {
 			return fmt.Errorf("create volume %s: %w", name, err)
 		}
-		if volume.Mountpoint == "" {
-			return fmt.Errorf("engine returned no mountpoint for volume %s", name)
-		}
-		if err := fillVolume(logger, filepath.Join(rootfs, bootDest), volume.Mountpoint); err != nil {
+		if err := fillVolume(logger, filepath.Join(rootfs, bootDest), dataDir); err != nil {
 			return fmt.Errorf("fill volume %s: %w", name, err)
 		}
-		mountpoint = volume.Mountpoint
 		return nil
 	}); err != nil {
 		return "", err
 	}
-	logger.Info("fabricated extension volume", "volume", name, "dest", bootDest, "source", mountpoint)
-
-	return mountpoint, nil
+	logger.Info("fabricated extension volume", "volume", name, "dest", bootDest, "source", dataDir)
+	return name, nil
 }
 
 // fillVolume seeds a volume from the extension's rootfs, mirroring the
-// copy-on-create the engine performs for an image-declared volume.
+// copy-on-create the engine performs for an image-declared volume. A volume
+// that already holds content is left alone: it is a previous fill of the same
+// image id. Nothing else ever writes here: activate publishes a symlink to the
+// volume during start, and every other consumer reads.
 //
-// A volume that already holds content is left alone: it is a previous fill of
-// the same image id. Nothing else ever writes here: activate publishes a
-// symlink to the volume during start, and every other consumer reads.
-func fillVolume(logger *slog.Logger, src, mountpoint string) error {
-	// One fill at a time, across processes. Two containers deployed from the
-	// same service and image share a volume, and the engine serialises creates
-	// per container rather than per volume: without this, one fill can wipe the
-	// tree another is copying into and both then finish believing the volume is
-	// complete. The lock is held on the volume directory itself so it costs no
-	// file inside a directory whose emptiness is load-bearing.
-	dir, err := os.Open(mountpoint)
+// The flock serialises fills across processes. Two containers deployed from the
+// same service and image share a volume, and the engine serialises creates per
+// container rather than per volume: without it one fill can wipe the tree
+// another is copying into, and both then finish believing the volume is
+// complete. The lock is held on the volume directory itself, so it costs no
+// file inside a directory whose emptiness is load-bearing.
+func fillVolume(logger *slog.Logger, src, dataDir string) error {
+	// One fill at a time, across processes.
+	dir, err := os.Open(dataDir)
 	if err != nil {
-		return fmt.Errorf("open %s: %w", mountpoint, err)
+		// Not under the docker root: no boot-by-abi link.
+		return fmt.Errorf("open volume data directory %s: %w", dataDir, err)
 	}
 	defer func() { _ = dir.Close() }()
 	if err := syscall.Flock(int(dir.Fd()), syscall.LOCK_EX); err != nil {
-		return fmt.Errorf("lock %s: %w", mountpoint, err)
+		return fmt.Errorf("lock %s: %w", dataDir, err)
 	}
 	defer func() { _ = syscall.Flock(int(dir.Fd()), syscall.LOCK_UN) }()
 
-	marker := filepath.Join(mountpoint, fabricatingMarker)
+	marker := filepath.Join(dataDir, fabricatingMarker)
 	interrupted, err := exists(marker)
 	if err != nil {
 		return err
 	}
 	if interrupted {
-		logger.Warn("volume holds a partial fill, wiping and refilling", "mountpoint", mountpoint)
-		if err := wipe(mountpoint); err != nil {
+		logger.Warn("volume holds a partial fill, wiping and refilling", "dir", dataDir)
+		if err := wipe(dataDir); err != nil {
 			return err
 		}
 	} else {
-		empty, err := isEmpty(mountpoint)
+		empty, err := isEmpty(dataDir)
 		if err != nil {
 			return err
 		}
 		if !empty {
-			logger.Debug("volume already filled, leaving it as it is", "mountpoint", mountpoint)
+			logger.Debug("volume already filled, leaving it as it is", "dir", dataDir)
 			return nil
 		}
 	}
@@ -149,9 +130,7 @@ func fillVolume(logger *slog.Logger, src, mountpoint string) error {
 	if !info.IsDir() {
 		return fmt.Errorf("%s is not a directory in the extension rootfs", src)
 	}
-	// The marker shares a directory with the copy, so an image shipping the
-	// same name would either lose that file when the marker is removed or, as
-	// a directory, wedge every retry on the same failed copy.
+	// The marker and the copy share a directory.
 	collides, err := exists(filepath.Join(src, fabricatingMarker))
 	if err != nil {
 		return err
@@ -164,32 +143,26 @@ func fillVolume(logger *slog.Logger, src, mountpoint string) error {
 	if err := os.WriteFile(marker, nil, 0o644); err != nil {
 		return fmt.Errorf("write fabrication marker: %w", err)
 	}
-	// The marker has to reach disk before the copy it guards, or a crash can
-	// leave a half-filled volume with nothing on disk to say so.
-	if err := syncDir(mountpoint); err != nil {
+	// The marker must be durable before the copy.
+	if err := syncDir(dataDir); err != nil {
 		return err
 	}
-	if err := copyTree(logger, src, mountpoint); err != nil {
+	if err := copyTree(logger, src, dataDir); err != nil {
 		return err
 	}
-	// copyTree has synced the content by here. Removing the marker before that
-	// would let a crash persist the removal while the copied kernel was still
-	// only in page cache, leaving a truncated volume that reads as complete
-	// forever after.
+	// copyTree synced the content, so the marker can go.
 	if err := os.Remove(marker); err != nil {
 		return fmt.Errorf("remove fabrication marker: %w", err)
 	}
-	return syncDir(mountpoint)
+	return syncDir(dataDir)
 }
 
 // copyTree copies directories, regular files and symlinks from src into dst,
-// and leaves what it wrote durable: file data is synced by copyFile, and each
-// directory is synced once filled so a crash cannot lose the names of files
-// whose content survived. A link needs no sync of its own, being nothing but
-// an entry in the directory that sync covers.
+// and leaves what it wrote durable: copyFile syncs file data, and each
+// directory is synced once filled, so a crash cannot lose the name of a file
+// whose content survived. A link needs no sync of its own.
 //
-// Devices and sockets are skipped: they carry no content worth copying, and a
-// boot tree that ships one is not asking for it to be published.
+// Devices and sockets are skipped: they carry no content worth copying.
 func copyTree(logger *slog.Logger, src, dst string) error {
 	entries, err := os.ReadDir(src)
 	if err != nil {
@@ -228,8 +201,8 @@ func copyTree(logger *slog.Logger, src, dst string) error {
 
 // copyLink reproduces a link rather than what it resolves to. A boot tree
 // names its kernel through one (vmlinuz -> vmlinuz-<version>), and dropping it
-// yields a volume that passes every emptiness check while the name the
-// initramfs loads is missing.
+// yields a volume that passes every emptiness check with the name the
+// initramfs loads missing.
 func copyLink(src, dst string) error {
 	target, err := os.Readlink(src)
 	if err != nil {
@@ -242,16 +215,13 @@ func copyLink(src, dst string) error {
 }
 
 // mkdir creates dir with perm, defeating the process umask so the copy
-// preserves the mode the image declared.
-//
-// The destination is empty or freshly wiped before the copy starts, and the
-// lock keeps it that way, so a name that already exists means an assumption
-// broke and the fill should say so rather than merge into whatever is there.
+// preserves the mode the image declared. An existing name is an error: the
+// destination is empty or freshly wiped under the lock, so a collision means
+// an assumption broke.
 func mkdir(dir string, perm os.FileMode) error {
 	if err := os.Mkdir(dir, perm); err != nil {
 		return fmt.Errorf("create %s: %w", dir, err)
 	}
-	// The umask applies to the create above, so the mode is set explicitly.
 	if err := os.Chmod(dir, perm); err != nil {
 		return fmt.Errorf("chmod %s: %w", dir, err)
 	}
@@ -275,8 +245,7 @@ func copyFile(src, dst string, perm os.FileMode) error {
 		_ = out.Close()
 		return fmt.Errorf("copy %s: %w", src, err)
 	}
-	// The fill marker is only removed once the content it guards is durable,
-	// so the data has to be on disk and not merely written.
+	// The marker's guarantee needs the data on disk.
 	if err := out.Sync(); err != nil {
 		_ = out.Close()
 		return fmt.Errorf("sync %s: %w", dst, err)
@@ -284,7 +253,7 @@ func copyFile(src, dst string, perm os.FileMode) error {
 	if err := out.Close(); err != nil {
 		return fmt.Errorf("close %s: %w", dst, err)
 	}
-	// The umask applies to the create above, so the mode is set explicitly.
+	// Defeat the umask on the create above.
 	if err := os.Chmod(dst, perm); err != nil {
 		return fmt.Errorf("chmod %s: %w", dst, err)
 	}

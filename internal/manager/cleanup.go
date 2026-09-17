@@ -39,6 +39,10 @@ type CleanupOpts struct {
 // the engine's container list.
 //
 // opts.PruneStaleOS adds a second pass over containers and images, on stale().
+//
+// A fabricated volume is dangling from birth, so the dangling filter on the
+// volume list only trims the response and the engine's in-use protection never
+// applies.
 func Cleanup(ctx context.Context, logger *slog.Logger, opts CleanupOpts) error {
 	return WithOperationLock(ctx, func() error {
 		return cleanup(ctx, logger, opts)
@@ -52,10 +56,7 @@ func cleanup(ctx context.Context, logger *slog.Logger, opts CleanupOpts) error {
 		return err
 	}
 
-	// Snapshotted before the container list, never the other way round: that
-	// order is the whole proof that a volume this sweep collects is
-	// unreferenced. A fabricated volume is dangling from birth, so the filter
-	// only trims the response and the engine's in-use protection never applies.
+	// Before the container list, which proves it unreferenced.
 	vols, volsErr := eng.ListVolumes(ctx, true)
 
 	containers, err := eng.ListContainers(ctx, labels.Class+"="+labels.ClassOverlay)
@@ -92,8 +93,7 @@ func cleanup(ctx context.Context, logger *slog.Logger, opts CleanupOpts) error {
 		removalErrs = append(removalErrs, pruneStaleOS(ctx, logger, eng, containers, dropped)...)
 	}
 
-	// After every container pass, so a volume freed above is collected in this
-	// run rather than at the next boot.
+	// After every container pass, so this run collects it.
 	if volsErr != nil {
 		return errors.Join(append(removalErrs, fmt.Errorf("list dangling volumes: %w", volsErr))...)
 	}
@@ -231,15 +231,16 @@ func garbageReason(ctx context.Context, logger *slog.Logger, eng *Engine, c Cont
 func claimedVolumes(containers []Container, dropped map[string]bool) (map[string]bool, error) {
 	claimed := make(map[string]bool)
 	for _, c := range containers {
-		if dropped[c.ID] || !labels.FabricatesVolume(c.Labels) {
+		if dropped[c.ID] {
 			continue
 		}
-		if c.ImageID == "" {
-			return nil, fmt.Errorf("the engine reported no image id for container %s, so its volume cannot be named",
-				labels.ShortID(c.ID))
+		name, err := labels.BootVolume(c.Labels, c.ID, c.ImageID)
+		if err != nil {
+			return nil, err
 		}
-		service, _ := labels.ResolveServiceName(c.Labels, c.ID)
-		claimed[labels.VolumeName(service, c.ImageID)] = true
+		if name != "" {
+			claimed[name] = true
+		}
 	}
 	return claimed, nil
 }

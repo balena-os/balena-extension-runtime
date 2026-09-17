@@ -17,16 +17,49 @@ func hostTree(t *testing.T) string {
 	root := t.TempDir()
 
 	prevState, prevBoot, prevVPN := StateMount, BootByABIDir, VPNActiveMarker
+	prevEngine := DataEngineRoot
 	StateMount = filepath.Join(root, "mnt", "state")
 	BootByABIDir = filepath.Join(root, "mnt", "data", "boot-by-abi")
+	DataEngineRoot = filepath.Join(root, "mnt", "data", "docker")
 	VPNActiveMarker = filepath.Join(root, "run", "openvpn", "active")
 	require.NoError(t, os.MkdirAll(StateMount, 0o755))
 	require.NoError(t, os.MkdirAll(BootByABIDir, 0o755))
 
 	t.Cleanup(func() {
 		StateMount, BootByABIDir, VPNActiveMarker = prevState, prevBoot, prevVPN
+		DataEngineRoot = prevEngine
 	})
 	return root
+}
+
+// TestKernelTarget pins the string the initramfs resolves. The engine's root
+// and BootByABIDir share a parent, so the target reaches the kernel through
+// it. A target built from the mountpoint the engine reports would cross the
+// bind at /var/lib/docker and resolve only in the running OS.
+func TestKernelTarget(t *testing.T) {
+	hostTree(t)
+
+	target, err := KernelTarget("volumes/ext_svc_abc_boot/_data", "Image")
+	require.NoError(t, err)
+	assert.Equal(t, "../docker/volumes/ext_svc_abc_boot/_data/Image", target)
+
+	// A separator would reach outside the volume.
+	for _, bad := range []string{"", ".", "..", "sub/Image", "../Image"} {
+		_, err := KernelTarget("volumes/ext_svc_abc_boot/_data", bad)
+		assert.Error(t, err, "%q is not a bare kernel image name", bad)
+	}
+}
+
+// TestKernelTarget_FollowsTheHostPaths is why this lives beside BootByABIDir.
+// Moving the published link moves what its target has to climb, and nothing
+// outside this package has to learn about it.
+func TestKernelTarget_FollowsTheHostPaths(t *testing.T) {
+	root := hostTree(t)
+	BootByABIDir = filepath.Join(root, "mnt", "data", "boot", "by-abi")
+
+	target, err := KernelTarget("volumes/ext_svc_abc_boot/_data", "Image")
+	require.NoError(t, err)
+	assert.Equal(t, "../../docker/volumes/ext_svc_abc_boot/_data/Image", target)
 }
 
 // The pairing this package exists for: what validation records is what
@@ -139,8 +172,7 @@ func TestPublishedKernels(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "../docker/volumes/w/_data/Image", target)
 
-	// A dangling link is exactly what the sweep collects, so the listing is
-	// not filtered on the link resolving.
+	// A dangling link is what the sweep collects.
 	published, err = ListPublished()
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"aaaa", "bbbb"}, published)
@@ -192,7 +224,7 @@ func TestHealthPrestate(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "BALENAOS_ROLLBACK_VPNONLINE=1\n", string(value))
 
-	// No temporary name survives, or the next arm would adopt it.
+	// A surviving temporary name would be adopted.
 	entries, err := os.ReadDir(StateMount)
 	require.NoError(t, err)
 	require.Len(t, entries, 1)

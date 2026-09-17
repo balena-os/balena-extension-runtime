@@ -112,9 +112,10 @@ func ReadState(containerID string) (*specs.State, error) {
 	return &s, nil
 }
 
-// WriteBootVolume records the host path of the volume create fabricated,
-// beside the container's state so RemoveState drops it with everything else.
-func WriteBootVolume(containerID, source string) error {
+// WriteBootVolume records the name of the volume create fabricated. The record
+// sits beside the container's state, so RemoveState drops it with everything
+// else. The name is all activate needs: it builds every path from it.
+func WriteBootVolume(containerID, name string) error {
 	if err := ValidateContainerID(containerID); err != nil {
 		return err
 	}
@@ -122,11 +123,11 @@ func WriteBootVolume(containerID, source string) error {
 	if err := os.MkdirAll(containerDir, 0o755); err != nil {
 		return fmt.Errorf("failed to create state directory: %w", err)
 	}
-	return atomicWrite(filepath.Join(containerDir, bootVolumeFileName), []byte(source))
+	return atomicWrite(filepath.Join(containerDir, bootVolumeFileName), []byte(name))
 }
 
-// ReadBootVolume returns the host path of the volume create fabricated for
-// a container.
+// ReadBootVolume returns the name of the volume create fabricated for a
+// container.
 func ReadBootVolume(containerID string) (string, error) {
 	if err := ValidateContainerID(containerID); err != nil {
 		return "", err

@@ -35,8 +35,8 @@ type world struct {
 	blockPath string
 	logger    *slog.Logger
 
-	// The claim query and a hook to run inside it, which is how a record
-	// landing between the recorded-set read and the query is injected.
+	// The claim query and a hook to run inside it, which injects a record
+	// landing mid-query.
 	claims    []string
 	claimErr  error
 	onClaim   func()
@@ -68,24 +68,26 @@ func newWorld(t *testing.T, entries ...string) *world {
 	t.Cleanup(bootenv.SetBootMount(boot))
 
 	prevState, prevBoot, prevVPN := override.StateMount, override.BootByABIDir, override.VPNActiveMarker
+	prevEngine := override.DataEngineRoot
 	override.StateMount = filepath.Join(w.root, "mnt", "state")
 	override.BootByABIDir = filepath.Join(w.root, "mnt", "data", "boot-by-abi")
+	override.DataEngineRoot = filepath.Join(w.root, "mnt", "data", "docker")
 	override.VPNActiveMarker = filepath.Join(w.root, "run", "openvpn", "active")
 	require.NoError(t, os.MkdirAll(override.StateMount, 0o755))
 	require.NoError(t, os.MkdirAll(override.BootByABIDir, 0o755))
 	t.Cleanup(func() {
 		override.StateMount, override.BootByABIDir, override.VPNActiveMarker = prevState, prevBoot, prevVPN
+		override.DataEngineRoot = prevEngine
 	})
 
 	prevMounts, prevActive, prevLabels := procMounts, activeRoot, byLabelDir
-	prevCmdline, prevDataRoot := procCmdline, dataRoot
+	prevCmdline := procCmdline
 	procMounts = filepath.Join(w.root, "proc-mounts")
 	byLabelDir = filepath.Join(w.root, "dev", "disk", "by-label")
 	procCmdline = filepath.Join(w.root, "proc-cmdline")
-	dataRoot = filepath.Join(w.root, "mnt", "data", "docker")
 	t.Cleanup(func() {
 		procMounts, activeRoot, byLabelDir = prevMounts, prevActive, prevLabels
-		procCmdline, dataRoot = prevCmdline, prevDataRoot
+		procCmdline = prevCmdline
 	})
 	w.slotIs("resin-rootA")
 	w.runningIs("")

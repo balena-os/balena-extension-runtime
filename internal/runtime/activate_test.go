@@ -26,9 +26,11 @@ func activateHost(t *testing.T) string {
 	root := t.TempDir()
 
 	prevBootByABI, prevState, prevVPN := override.BootByABIDir, override.StateMount, override.VPNActiveMarker
+	prevEngine := override.DataEngineRoot
 	prevMounted, prevArm := isMounted, armOverride
 
 	override.BootByABIDir = filepath.Join(root, "mnt", "data", "boot-by-abi")
+	override.DataEngineRoot = filepath.Join(root, "mnt", "data", "docker")
 	override.StateMount = filepath.Join(root, "mnt", "state")
 	override.VPNActiveMarker = filepath.Join(root, "run", "openvpn", "active")
 	isMounted = func(string) (bool, error) { return true, nil }
@@ -38,6 +40,7 @@ func activateHost(t *testing.T) string {
 
 	t.Cleanup(func() {
 		override.BootByABIDir, override.StateMount, override.VPNActiveMarker = prevBootByABI, prevState, prevVPN
+		override.DataEngineRoot = prevEngine
 		isMounted, armOverride = prevMounted, prevArm
 	})
 	return root
@@ -58,16 +61,23 @@ func activateRootfs(t *testing.T, root, content string) (string, string) {
 }
 
 // fabricatedVolume records a filled volume for a container the way create
-// would have, and returns its mountpoint.
+// would have, and returns its data directory.
 func fabricatedVolume(t *testing.T, root, containerID, name string) string {
 	t.Helper()
-	mountpoint := filepath.Join(root, "var", "lib", "docker", "volumes", name, "_data")
-	require.NoError(t, os.MkdirAll(mountpoint, 0o755))
-	// create fills the volume from the extension's /boot, so the kernel is
-	// in it by the time start publishes a link naming it.
-	require.NoError(t, os.WriteFile(filepath.Join(mountpoint, "Image"), nil, 0o644))
-	require.NoError(t, oci.WriteBootVolume(containerID, mountpoint))
-	return mountpoint
+	dockerRoot(t, root)
+	dataDir := filepath.Join(root, "var", "lib", "docker", "volumes", name, "_data")
+	require.NoError(t, os.MkdirAll(dataDir, 0o755))
+	// create fills the volume before start publishes the link.
+	require.NoError(t, os.WriteFile(filepath.Join(dataDir, "Image"), nil, 0o644))
+	require.NoError(t, oci.WriteBootVolume(containerID, name))
+	return dataDir
+}
+
+// dockerRoot points the runtime at the engine root under a test's tree.
+func dockerRoot(t *testing.T, root string) {
+	t.Helper()
+	oci.SetDockerRoot(filepath.Join(root, "var", "lib", "docker"))
+	t.Cleanup(func() { oci.SetDockerRoot(defaultDockerRoot) })
 }
 
 // A userspace-only extension is not a kernel override and activation is a
@@ -226,8 +236,8 @@ func TestActivate_VolumeWithoutTheKernelIsRetryable(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	root := activateHost(t)
 	rootfs, abi := activateRootfs(t, root, "kernel")
-	mountpoint := fabricatedVolume(t, root, "c1", "ext_test_abc_boot")
-	require.NoError(t, os.Remove(filepath.Join(mountpoint, "Image")))
+	dataDir := fabricatedVolume(t, root, "c1", "ext_test_abc_boot")
+	require.NoError(t, os.Remove(filepath.Join(dataDir, "Image")))
 
 	err := activate(context.Background(), activateTestLogger, "c1", rootfs, map[string]string{
 		labels.Class:       labels.ClassOverlay,
@@ -299,16 +309,15 @@ func TestActivate_MissingVolumeRecordIsRetryable(t *testing.T) {
 	assert.NotErrorIs(t, err, errVerdict)
 }
 
-// The engine's data root is a bind of the data partition's, so a mountpoint
-// that is not where the data partition expects it means the engine's layout
-// is not the one this OS was built against.
-func TestActivate_ForeignVolumeLayoutIsRetryable(t *testing.T) {
+// A volume the engine put somewhere else has no data directory under the
+// docker root, and activate looks nowhere else. A later boot can fix that, so
+// it is a machine condition.
+func TestActivate_AbsentVolumeDirIsRetryable(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	root := activateHost(t)
 	rootfs, abi := activateRootfs(t, root, "kernel")
-	stray := filepath.Join(root, "somewhere", "else")
-	require.NoError(t, os.MkdirAll(stray, 0o755))
-	require.NoError(t, oci.WriteBootVolume("c1", stray))
+	dockerRoot(t, root)
+	require.NoError(t, oci.WriteBootVolume("c1", "ext_test_abc_boot"))
 
 	err := activate(context.Background(), activateTestLogger, "c1", rootfs, map[string]string{
 		labels.Class:       labels.ClassOverlay,
@@ -335,8 +344,7 @@ func TestActivate_PublishesArmsAndRecordsThePrestate(t *testing.T) {
 		labels.KernelABIID: abi,
 	}))
 
-	// The link is relative to the data partition, not to the engine's data
-	// root, so it resolves the same way in the initramfs.
+	// Relative to the data partition, as the initramfs resolves it.
 	target, err := os.Readlink(filepath.Join(override.BootByABIDir, abi))
 	require.NoError(t, err)
 	assert.Equal(t, "../docker/volumes/ext_test_abc_boot/_data/Image", target)
@@ -365,7 +373,7 @@ func TestActivate_PrestateIsPublishedWhole(t *testing.T) {
 	path := filepath.Join(override.StateMount, "extension-health-variables")
 	require.NoError(t, os.WriteFile(path, []byte("BALENAOS_ROLLBACK_VPNONLINE=1\n"), 0o644))
 
-	// The rename is the only thing that may touch the published name.
+	// Only the rename may touch the published name.
 	armOverride = func(string) error {
 		entries, err := os.ReadDir(override.StateMount)
 		require.NoError(t, err)
@@ -476,27 +484,4 @@ func TestActivate_DeclinedExtensionWritesNothing(t *testing.T) {
 	_, statErr = os.Stat(filepath.Join(override.StateMount, "extension-health-variables"))
 	assert.ErrorIs(t, statErr, os.ErrNotExist)
 	assert.Zero(t, armed)
-}
-
-func TestVolumeTarget(t *testing.T) {
-	target, err := volumeTarget("/var/lib/docker/volumes/ext_svc_abc_boot/_data", "Image")
-	require.NoError(t, err)
-	assert.Equal(t, "../docker/volumes/ext_svc_abc_boot/_data/Image", target)
-
-	for _, bad := range []string{
-		"/var/lib/docker/volumes/ext_svc_abc_boot",
-		"/var/lib/docker/ext_svc_abc_boot/_data",
-		"/_data",
-		"",
-	} {
-		_, err := volumeTarget(bad, "Image")
-		assert.Error(t, err, "%q is not a fabricated volume mountpoint", bad)
-	}
-
-	// The link names one file inside the volume, so anything carrying a
-	// separator would reach outside it.
-	for _, bad := range []string{"", "sub/Image", "../Image"} {
-		_, err := volumeTarget("/var/lib/docker/volumes/ext_svc_abc_boot/_data", bad)
-		assert.Error(t, err, "%q is not a bare kernel image name", bad)
-	}
 }

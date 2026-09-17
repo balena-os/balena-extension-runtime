@@ -45,14 +45,27 @@ func FabricatesVolume(lbls map[string]string) bool {
 	return lbls[KernelABIID] != ""
 }
 
-// ResolveServiceName returns the service name a fabricated volume is keyed on,
-// falling back to a container id prefix for a manual deploy that carries no
-// such label.
-func ResolveServiceName(lbls map[string]string, containerID string) (string, bool) {
+// resolveServiceName returns the key a fabricated volume is named after. A
+// manual deploy carries no service label, so the container id prefix stands in.
+func resolveServiceName(lbls map[string]string, containerID string) string {
 	if name := lbls[ServiceName]; name != "" {
-		return name, false
+		return name
 	}
-	return ShortID(containerID), true
+	return ShortID(containerID)
+}
+
+// BootVolume returns the name of the /boot volume a kernel override gets, or
+// "" for an extension that gets none. create fabricates the volume, and
+// cleanup's retention guard re-derives the name, so both go through here.
+func BootVolume(lbls map[string]string, containerID, imageID string) (string, error) {
+	if !FabricatesVolume(lbls) {
+		return "", nil
+	}
+	if imageID == "" {
+		return "", fmt.Errorf("no image id for container %s, so its volume cannot be named",
+			ShortID(containerID))
+	}
+	return VolumeName(resolveServiceName(lbls, containerID), imageID), nil
 }
 
 // VolumeName derives the name of the volume backing /boot for an extension.

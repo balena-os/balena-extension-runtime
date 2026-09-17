@@ -96,14 +96,14 @@ func TestReadStateNotFound(t *testing.T) {
 func TestBootVolumeRoundTrip(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 
-	const source = "/var/lib/docker/volumes/ext_svc_abc_boot/_data"
-	require.NoError(t, WriteBootVolume("abc123", source))
+	const name = "ext_svc_abc_boot"
+	require.NoError(t, WriteBootVolume("abc123", name))
 
 	got, err := ReadBootVolume("abc123")
 	require.NoError(t, err)
-	assert.Equal(t, source, got)
+	assert.Equal(t, name, got)
 
-	// RemoveState drops the record with the rest of the container's state.
+	// RemoveState drops the record with the state.
 	require.NoError(t, RemoveState("abc123"))
 	_, err = ReadBootVolume("abc123")
 	assert.ErrorIs(t, err, os.ErrNotExist)

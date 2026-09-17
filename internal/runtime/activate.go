@@ -17,11 +17,7 @@ import (
 	"github.com/balena-os/hostapp"
 )
 
-// Where the data partition carries the engine's volumes.
-const dataVolumes = "docker/volumes"
-
-// Test seams, following the package's convention for the proxy and the
-// engine.
+// Test seams.
 var (
 	isMounted   = mounts.IsMounted
 	armOverride = bootenv.Arm
@@ -61,7 +57,7 @@ func activate(ctx context.Context, logger *slog.Logger, containerID, rootfs stri
 			errVerdict, bootDest, labels.KernelABIID, abi)
 	}
 
-	// mobynit's claim query cannot mount, so only this can check the pairing.
+	// Only this can check the pairing: mobynit cannot mount.
 	release, err := moduleRelease(rootfs)
 	if err != nil {
 		return err
@@ -71,14 +67,13 @@ func activate(ctx context.Context, logger *slog.Logger, containerID, rootfs stri
 			errVerdict, labels.KernelABIID, abi)
 	}
 
-	// A mismatched label survives the kexec, then FilterByKernelVersion drops
-	// the extension and the new kernel boots without its modules.
+	// A mismatched label boots without the extension's modules.
 	if kver := annotations[labels.KernelVersion]; kver != "" && kver != kernelVersion(release) {
 		return fmt.Errorf("%w: %s=%s does not match the %s modules the image ships",
 			errVerdict, labels.KernelVersion, kver, release)
 	}
 
-	// Machine checks from here. A listed ABI is still a verdict.
+	// Machine checks from here, except a listed ABI.
 	mounted, err := isMounted(override.StateMount)
 	if err != nil {
 		return fmt.Errorf("checking whether %s is mounted: %w", override.StateMount, err)
@@ -95,20 +90,27 @@ func activate(ctx context.Context, logger *slog.Logger, containerID, rootfs stri
 		return fmt.Errorf("%w: kernel override %s was rejected by health validation", errVerdict, abi)
 	}
 
-	source, err := oci.ReadBootVolume(containerID)
+	name, err := oci.ReadBootVolume(containerID)
+	if err != nil {
+		return err
+	}
+	source, err := oci.VolumeDataDir(name)
 	if err != nil {
 		return err
 	}
 	if _, err := os.Stat(source); err != nil {
 		return fmt.Errorf("fabricated volume for %s: %w", containerID, err)
 	}
-	// The link names the kernel, so a volume without it would dangle. create
-	// fills the volume, so a gap here is not the image's fault.
+	// A volume without the kernel would dangle the link.
 	kernel := filepath.Base(image)
 	if _, err := os.Stat(filepath.Join(source, kernel)); err != nil {
 		return fmt.Errorf("fabricated volume for %s does not hold %s: %w", containerID, kernel, err)
 	}
-	target, err := volumeTarget(source, kernel)
+	rel, err := oci.VolumeRelDir(name)
+	if err != nil {
+		return err
+	}
+	target, err := override.KernelTarget(rel, kernel)
 	if err != nil {
 		return err
 	}
@@ -167,24 +169,4 @@ func kernelVersion(release string) string {
 		return release[:i]
 	}
 	return release
-}
-
-// volumeTarget returns the link target for a fabricated volume's kernel,
-// relative to the data partition.
-//
-// Only the volume's name carries over. /var/lib/docker is a bind of
-// /mnt/data/docker, so a path derived from the reported mountpoint crosses
-// the bind and resolves in the running OS but not in the initramfs.
-func volumeTarget(mountpoint, kernel string) (string, error) {
-	clean := filepath.Clean(mountpoint)
-	dir := filepath.Dir(clean)
-	name := filepath.Base(dir)
-	if filepath.Base(clean) != "_data" || filepath.Base(filepath.Dir(dir)) != "volumes" ||
-		name == "." || name == string(filepath.Separator) {
-		return "", fmt.Errorf("fabricated volume mountpoint %q is not .../volumes/<name>/_data", mountpoint)
-	}
-	if kernel == "" || strings.ContainsRune(kernel, filepath.Separator) {
-		return "", fmt.Errorf("kernel image name %q is not a bare file name", kernel)
-	}
-	return filepath.Join("..", dataVolumes, name, "_data", kernel), nil
 }
