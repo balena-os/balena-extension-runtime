@@ -7,16 +7,14 @@ import (
 	"os"
 	"time"
 
-	"github.com/balena-os/balena-extension-runtime/internal/hooks"
 	"github.com/balena-os/balena-extension-runtime/internal/labels"
 	"github.com/balena-os/balena-extension-runtime/internal/oci"
 	"github.com/balena-os/balena-extension-runtime/internal/proxy"
 	"github.com/opencontainers/runtime-spec/specs-go"
 )
 
-// proxySpawnTimeout bounds how long we wait on the proxy spawn itself (fork +
-// exec). Once Start returns the proxy detaches and lives independently, so
-// this only guards against a wedged fork/exec — not the proxy's lifetime.
+// proxySpawnTimeout bounds the wait for the proxy to become ready for
+// signals. It does not bound the fork, the exec or the proxy's lifetime.
 const proxySpawnTimeout = 10 * time.Second
 
 // Test seams: tests override these to assert the cleanup defer is wired up
@@ -27,9 +25,9 @@ var (
 	proxyStop       = proxy.Stop
 )
 
-// Create validates the extension, runs the create hook, spawns the proxy,
-// and writes the initial OCI state. ctx bounds the proxy spawn and lets the
-// caller (typically containerd via SIGTERM) cancel an in-flight create.
+// Create validates the extension, spawns the proxy, and writes the initial
+// OCI state. ctx bounds the proxy spawn and lets the caller (typically
+// containerd via SIGTERM) cancel an in-flight create.
 func Create(ctx context.Context, logger *slog.Logger, containerID string, bundlePath string, pidFile string) error {
 	bundlePath, err := oci.NormalizeBundlePath(bundlePath)
 	if err != nil {
@@ -41,21 +39,22 @@ func Create(ctx context.Context, logger *slog.Logger, containerID string, bundle
 		return fmt.Errorf("failed to read OCI spec: %w", err)
 	}
 
-	// balena-engine does not copy container labels into OCI spec annotations.
-	// Fall back to reading them from the Docker container store.
-	oci.EnrichAnnotations(logger, spec, containerID)
+	// Resolve the identity once. Every later step reads it.
+	id := oci.ReadIdentity(logger, spec, containerID)
 
 	rootfs, err := oci.ResolveRootfs(spec, bundlePath)
 	if err != nil {
 		return fmt.Errorf("resolve rootfs: %w", err)
 	}
 
-	if err := labels.Validate(spec.Annotations); err != nil {
+	if err := labels.Validate(id.Labels); err != nil {
 		return fmt.Errorf("invalid extension: %w", err)
 	}
 
-	if err := hooks.ExecuteIfPresent(logger, rootfs, "hooks/create", spec.Annotations, spec.Mounts); err != nil {
-		return err
+	// Fabricate before the spawn: a failure leaves no proxy.
+	name, err := fabricateBootVolume(ctx, logger, id, rootfs, containerID)
+	if err != nil {
+		return fmt.Errorf("fabricate boot volume: %w", err)
 	}
 
 	spawnCtx, cancel := context.WithTimeout(ctx, proxySpawnTimeout)
@@ -81,9 +80,18 @@ func Create(ctx context.Context, logger *slog.Logger, containerID string, bundle
 	state := oci.NewState(containerID, bundlePath)
 	state.Pid = pid
 	state.Status = specs.StateCreated
-	state.Annotations = spec.Annotations
+	state.Annotations = id.Labels
+	if state.Annotations == nil {
+		// state.json carries an object, never null.
+		state.Annotations = map[string]string{}
+	}
 	if err := oci.WriteState(state); err != nil {
 		return err
+	}
+	if name != "" {
+		if err := oci.WriteBootVolume(containerID, name); err != nil {
+			return err
+		}
 	}
 
 	if pidFile != "" {

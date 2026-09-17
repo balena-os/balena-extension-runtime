@@ -25,6 +25,9 @@ COPY --from=gobuild /src/balena-extension-manager /src/balena-extension-manager
 COPY --from=gobuild /src/integration.test /src/integration.test
 COPY --from=gobuild /src/e2e.test /src/e2e.test
 
+# The runtime dials balena-engine's socket, which is what the host OS runs.
+RUN ln -s /var/run/docker.sock /var/run/balena-engine.sock
+
 # Register extension runtime so containers created with --runtime=extension
 # go through our binary.
 RUN mkdir -p /etc/docker && \
@@ -61,6 +64,24 @@ for i in $(seq 1 60); do
     fi
     sleep 1
 done
+
+# The runtime writes to the paths the device has, so the test image gets
+# them.
+mkdir -p /mnt/state /mnt/data /mnt/boot
+mount --bind /mnt/state /mnt/state
+mount --bind /mnt/boot /mnt/boot
+mkdir -p /mnt/data/docker
+mount --bind /var/lib/docker /mnt/data/docker
+
+# What "grub-editenv create" plus a set leaves behind, seeded by hand: grub is
+# not in this image and the runtime's own reader is what the test exercises.
+{
+    printf '# GRUB Environment Block\n'
+    printf 'kernel_override_trial=2\n'
+} > /mnt/boot/bootenv
+# Pad to grub's fixed block size, measured rather than hardcoded.
+printf '%0.s#' $(seq 1 $((1024 - $(wc -c < /mnt/boot/bootenv)))) >> /mnt/boot/bootenv
+[ "$(wc -c < /mnt/boot/bootenv)" = "1024" ] || { echo "seeded bootenv is not 1024 bytes"; exit 1; }
 
 echo "=== Running integration tests ==="
 /src/integration.test -test.v

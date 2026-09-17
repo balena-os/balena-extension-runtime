@@ -1,144 +1,108 @@
 Balena extension runtime
 ========================
 
-An OCI-compliant container runtime for balenaOS hostapp extensions. It
-implements the OCI runtime spec interface (`create`, `start`, `kill`,
-`delete`, `state`) but instead of running long-lived processes, it executes
-overlay-based extensions that apply filesystem changes to the host and exit
-immediately.
+An OCI runtime for balenaOS hostapp extensions. It implements the OCI runtime
+commands `create`, `start`, `kill`, `delete` and `state`. It runs no
+long-lived process: an extension is an overlay that the host applies at boot,
+and its container exits.
 
-The runtime is invoked by containerd as a shim — it is not called directly
-by users.
+The containerd shim runs the runtime. Users do not run it. The same binary is
+also `balena-extension-manager`, a hard link that selects its commands from
+`argv[0]`. The manager does maintenance outside the OCI lifecycle.
+
+[docs/extension-lifecycle.md](docs/extension-lifecycle.md) describes the full
+flow: the container lifecycle, the proxy that carries the verdict, the labels,
+volume fabrication, kernel overrides and withdrawal. Read it before you change
+any of them.
 
 ## Build
 
 ```bash
-# Build the binary (statically linked, no CGO).
-# Also creates the balena-extension-manager hard link.
-make build
-
-# Run unit tests
-make test
-
-# Run static analysis
-make vet
+make build   # static binary, no CGO, plus the balena-extension-manager link
+make test    # unit tests
+make vet     # static analysis
 ```
 
-E2E tests require the binary to be built first:
+Build the binary before you run the e2e tests:
 
 ```bash
 make build && go test -v ./e2e/
 ```
 
-Integration tests run under docker compose:
+The integration tests run under docker compose:
 
 ```bash
 make test-integration
 ```
 
-## Usage
+## Manager commands
 
-The runtime follows the standard OCI container lifecycle:
+| Command | When it runs |
+|---|---|
+| `cleanup` | Every boot, after the engine starts. It removes garbage containers and the fabricated volumes that no container claims. |
+| `cleanup --stale-os` | After a host OS update commits. It also removes the containers and images that the running system does not satisfy. |
+| `validate` | Every boot, from `extension-rollback.service`. It judges an armed kernel override. |
+| `hup commit`, `hup reject` | From meta-balena's `rollback-health`, in a host OS update window. |
 
-1. `create` — Reads `config.json`, validates extension labels, runs the
-   `hooks/create` hook, spawns a proxy process, and writes OCI state
-2. `start` — Runs the `hooks/start` hook, signals the proxy to exit cleanly
-   (SIGUSR1), and transitions the container to `stopped`
-3. `kill` — Sends a signal to the proxy process
-4. `delete` — Runs the `hooks/delete` hook and removes runtime state
-5. `state` — Returns OCI state JSON to stdout
+The `validate` unit sets the healthcheck waits with `--settle`, `--retry` and
+`--attempts`.
 
-### Why extensions exit immediately
+Do not run `cleanup --stale-os` or `hup` outside its window. Read the lifecycle
+document first.
 
-Unlike traditional runtimes, extensions don't run persistent processes. They
-apply overlay filesystem changes during their hooks and then exit. The `start`
-command intentionally transitions the container to `stopped` — this is by
-design.
+## Concurrency
 
-### Proxy process
+The code does not show which process calls it. So it does not show which
+operations can run at the same time. Read this section before you add a lock
+or a defensive check, or review code for a race.
 
-The runtime spawns a proxy subprocess (`balena-extension-runtime proxy`)
-during `create` to give containerd a real PID to track between `create` and
-`start`. The proxy blocks on signals:
+### Helios gates the runtime
 
-- **SIGUSR1** — "start complete", exit cleanly (container shows "Exited (0)")
-- **SIGTERM/SIGINT** — killed, exit cleanly
+Only helios deploys extensions. The legacy supervisor refuses them. Helios
+creates the container with no restart policy, starts it and waits for it to
+exit. The engine runs `create` and `start` one time for each container.
 
-### Extension labels
+Helios waits to deploy, redeploy or remove an extension while
+`rollback-health` or `extension-rollback` runs or has a queued start job. The
+wait covers the full override trial. See `host_validating` in
+`helios-balenahup/src/read.rs`.
 
-Extensions are identified by OCI annotations (image labels):
+| Entry point | Called by | Can overlap |
+|---|---|---|
+| runtime `create`, `start` | the engine, for a helios deploy | boot-time `cleanup` |
+| `validate` | `extension-rollback.service` | boot-time `cleanup` |
+| `hup commit`, `hup reject`, `cleanup --stale-os` | `rollback-health` | boot-time `cleanup` |
+| `cleanup` | `hostapp-extensions-cleanup.service` | all of the above |
 
-| Label                              | Required | Description                                  |
-|------------------------------------|----------|----------------------------------------------|
-| `io.balena.image.class`           | yes      | Must be `overlay`                            |
-| `io.balena.image.kernel-version`  | no       | Kernel ABI version (M.m.p) for userspace compatibility |
-| `io.balena.image.kernel-abi-id`   | no       | Kernel binary interface identifier for module/eBPF compatibility |
-| `io.balena.image.os-version`      | no       | HUP-commit retention predicate: comma-separated shell globs matched against `/etc/os-release` `VERSION_ID` |
+Runtime `create` and `start` never overlap `validate` or the `hup` commands. Do
+not add code for a deploy during validation.
 
-The runtime acts on the labels above. Any other annotation under the
-`io.balena.image.*` prefix is opaque to the runtime but is still forwarded to
-hooks as an environment variable (see below).
+This section does not cover two cases:
 
-### Extension hooks
+- Helios reads a unit that it cannot query as not running. Thus an OS without
+  the unit does not stop helios.
+- An operator can run `balena run --runtime extension`. Helios does not see
+  that container.
 
-Extensions can ship executable scripts at `<rootfs>/hooks/{create,start,delete}`.
-Hooks receive the following environment variables:
+### The operation lock
 
-- `EXTENSION_ROOTFS` — absolute path to the extension rootfs
-- `EXTENSION_IMAGE_*` — every annotation under the `io.balena.image.*` prefix
-  is forwarded as `EXTENSION_IMAGE_<NAME>`, with dashes converted to
-  underscores and uppercased (e.g., `io.balena.image.kernel-abi-id` becomes
-  `EXTENSION_IMAGE_KERNEL_ABI_ID`). The forwarding is prefix-based, so custom
-  or future labels are available to hooks without runtime changes.
+`WithOperationLock` in `internal/manager/lock.go` is a flock on `/run` that
+all processes share. It prevents one race: runtime `create` against boot-time
+`cleanup`. Create-or-get can reuse a volume that already exists. Without the
+lock, `cleanup` can remove that volume before `start` publishes its kernel.
 
-### State management
+### How helios reads a container
 
-OCI state is persisted as JSON under
-`$XDG_RUNTIME_DIR/balena-extension-runtime/<container-id>/state.json`.
-Writes use atomic rename for crash safety.
+| Engine state | Helios result |
+|---|---|
+| `Exited (0)` | activated |
+| `Created`, or a failed start with an exit code other than 126 or 127 | retry |
+| any other exit code | failed, and the deploy stops the host update |
 
-## Manager
-
-The manager command (`balena-extension-manager`) runs outside the OCI
-lifecycle. It is invoked from HUP hooks and ad-hoc maintenance. The binary
-is a hard link to `balena-extension-runtime` and dispatches on `argv[0]`.
-
-### `cleanup`
-
-Removes dead extension containers. Safe to run at any time.
-
-```
-balena-extension-manager cleanup
-```
-
-### `cleanup --stale-os`
-
-Post-commit cleanup: removes dead containers, containers whose
-`kernel-version` or `kernel-abi-id` labels mismatch the running kernel,
-and extension images whose `io.balena.image.os-version` label doesn't
-match `/etc/os-release` `VERSION_ID`.
-
-This flag is safe **only after** the HUP rollback-health commit. Outside
-that window, stale containers and images are the rollback target and
-must be preserved.
-
-### `os-version` label grammar
-
-- Value is a comma-separated list of shell-style globs
-  (`filepath.Match` semantics).
-- An image is retained if **any** pattern matches the running
-  `VERSION_ID`, or if the label is absent/empty (legacy-safe default).
-- Examples:
-  - `2.119.0` — exact match, drops on any other version.
-  - `2.119.*` — retains across patch or suffix bumps (`2.119.0-staging`,
-    `2.119.1+rev1`, etc.).
-  - `2.119.*,2.120.*` — builder opts in to one minor version of forward
-    compat.
-
-Note that `filepath.Match`'s `*` matches `.`, so `2.119.*` also matches
-`2.119.0-staging` and similar suffixed versions — this is intentional.
+Thus helios retries a `start` that returns an error. The proxy exit status is
+the verdict only when `start` returns success.
 
 ## Requirements
 
-- Go 1.22+
-- Linux (uses syscall signals and process management)
+- Go 1.22 or later
+- Linux, for the syscall signals and the process management

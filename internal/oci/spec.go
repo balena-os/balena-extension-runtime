@@ -76,9 +76,10 @@ var (
 	dockerRoot   = "/var/lib/docker"
 )
 
-// SetDockerRoot sets the Docker data root directory used by EnrichAnnotations
-// to locate container metadata. It should be called with the value of the
-// --docker-root flag before any runtime operations. Safe for concurrent use.
+// SetDockerRoot sets the Docker data root. ReadIdentity locates container
+// metadata under it, and VolumeDataDir locates volume data. Call it with the
+// --docker-root flag value before any runtime operation. Safe for concurrent
+// use.
 func SetDockerRoot(root string) {
 	dockerRootMu.Lock()
 	defer dockerRootMu.Unlock()
@@ -91,58 +92,99 @@ func getDockerRoot() string {
 	return dockerRoot
 }
 
-// dockerConfig is the subset of config.v2.json we need.
+// dockerConfig is the subset of config.v2.json we need. Image is the id of
+// the image the container was created from, in "sha256:<hex>" form.
 type dockerConfig struct {
+	Image  string `json:"Image"`
 	Config struct {
 		Labels map[string]string `json:"Labels"`
 	} `json:"Config"`
 }
 
-// EnrichAnnotations copies Docker container labels into spec.Annotations when
-// the annotations are absent. balena-engine does not propagate container labels
-// to the OCI spec annotations field, so the runtime reads them directly from
-// the Docker container store as a fallback.
+// Identity is what create resolves once about a container's extension, and
+// what start reads back from the OCI state.
+type Identity struct {
+	// Labels are the container's labels as the engine recorded them. The
+	// manager's volume sweep is handed the same map, so volume identity comes
+	// from these and not from spec.Annotations: a create that named the volume
+	// from the other map would strand it. With no store to read, the spec's
+	// annotations are the whole identity.
+	Labels map[string]string
+
+	// ImageID is the digest of the image the container was created from, in
+	// "sha256:<hex>" form, or "" when there was no store to read.
+	ImageID string
+}
+
+// ReadIdentity resolves which extension a container holds. balena-engine does
+// not copy container labels into OCI spec annotations, so the container store
+// comes first. When config.v2.json reads, both fields come from it. Otherwise
+// the spec's annotations are the identity, and there is no image id.
 //
-// The default Docker root is /var/lib/docker; call SetDockerRoot to override.
-// containerID is the OCI container ID (same as the Docker container ID).
+// One source gives both fields. A store container with no labels gets no
+// fallback to the spec, so class validation reports the missing label.
+// ReadIdentity does not modify spec.
 //
-// This is best-effort: if the Docker config is missing or unparseable, the
-// reason is logged at debug and validation will later fail with "missing
-// required label". The debug log is what lets you diagnose that situation.
-func EnrichAnnotations(logger *slog.Logger, spec *specs.Spec, containerID string) {
-	if len(spec.Annotations) > 0 {
-		return // already populated (e.g. synthetic test bundles)
+// The default Docker root is /var/lib/docker. Call SetDockerRoot to override.
+func ReadIdentity(logger *slog.Logger, spec *specs.Spec, containerID string) Identity {
+	if dc, ok := readDockerConfig(logger, containerID); ok {
+		return Identity{Labels: dc.Config.Labels, ImageID: dc.Image}
 	}
+	return Identity{Labels: spec.Annotations}
+}
+
+// VolumeRelDir returns a volume's data directory, relative to the Docker data
+// root. It holds the only copy of the engine's volume layout, and the only
+// check of a volume name.
+func VolumeRelDir(name string) (string, error) {
+	if name == "" || name == "." || name == ".." ||
+		strings.ContainsRune(name, filepath.Separator) {
+		return "", fmt.Errorf("volume name %q is not a bare file name", name)
+	}
+	return filepath.Join("volumes", name, "_data"), nil
+}
+
+// VolumeDataDir returns where the engine holds a volume's data under the
+// configured Docker data root.
+func VolumeDataDir(name string) (string, error) {
+	rel, err := VolumeRelDir(name)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(getDockerRoot(), rel), nil
+}
+
+// readDockerConfig loads the container store's config.v2.json for containerID.
+// The bool reports whether the file was read and decoded; every failure is a
+// debug log rather than an error, because the caller has a usable fallback
+// for each of them.
+func readDockerConfig(logger *slog.Logger, containerID string) (dockerConfig, bool) {
+	var dc dockerConfig
 	// Validate before touching the filesystem — a crafted ID like
 	// "../../../etc" would otherwise be joined into configPath and os.Open'd
 	// against dockerRoot.
 	if err := ValidateContainerID(containerID); err != nil {
-		logger.Debug("skipping annotation enrichment: invalid container ID",
+		logger.Debug("skipping container store lookup: invalid container ID",
 			"id", containerID, "err", err)
-		return
+		return dc, false
 	}
 	configPath := filepath.Join(getDockerRoot(), "containers", containerID, "config.v2.json")
 
 	f, err := os.Open(configPath)
 	if err != nil {
-		logger.Debug("could not read docker container config for label fallback",
+		logger.Debug("could not read docker container config",
 			"path", configPath, "err", err)
-		return
+		return dc, false
 	}
 	defer func() { _ = f.Close() }()
 
-	var dc dockerConfig
 	if err := json.NewDecoder(f).Decode(&dc); err != nil {
 		logger.Debug("could not decode docker container config",
 			"path", configPath, "err", err)
-		return
+		return dc, false
 	}
 	if len(dc.Config.Labels) == 0 {
 		logger.Debug("docker container config has no labels", "path", configPath)
-		return
 	}
-	spec.Annotations = make(map[string]string, len(dc.Config.Labels))
-	for k, v := range dc.Config.Labels {
-		spec.Annotations[k] = v
-	}
+	return dc, true
 }

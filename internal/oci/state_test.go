@@ -1,6 +1,7 @@
 package oci
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -90,4 +91,28 @@ func TestReadStateNotFound(t *testing.T) {
 
 	_, err := ReadState("nonexistent")
 	require.Error(t, err)
+}
+
+func TestBootVolumeRoundTrip(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	const name = "ext_svc_abc_boot"
+	require.NoError(t, WriteBootVolume("abc123", name))
+
+	got, err := ReadBootVolume("abc123")
+	require.NoError(t, err)
+	assert.Equal(t, name, got)
+
+	// RemoveState drops the record with the state.
+	require.NoError(t, RemoveState("abc123"))
+	_, err = ReadBootVolume("abc123")
+	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
+// A missing record is an error, never an empty path.
+func TestReadBootVolumeAbsent(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	_, err := ReadBootVolume("never-created")
+	assert.ErrorIs(t, err, os.ErrNotExist)
 }

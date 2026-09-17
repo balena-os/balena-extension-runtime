@@ -1,6 +1,8 @@
 package oci
 
 import (
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -103,4 +105,93 @@ func TestResolveRootfsAbsolute(t *testing.T) {
 	rootfs, err := ResolveRootfs(spec, bundle)
 	require.NoError(t, err)
 	assert.Equal(t, "/var/lib/docker/overlay2/abc/merged", rootfs)
+}
+
+// writeContainerConfig writes a config.v2.json fixture into a fresh docker
+// root and points the package at it for the duration of the test.
+func writeContainerConfig(t *testing.T, containerID, body string) {
+	t.Helper()
+	root := t.TempDir()
+	dir := filepath.Join(root, "containers", containerID)
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.v2.json"), []byte(body), 0o644))
+
+	prev := getDockerRoot()
+	SetDockerRoot(root)
+	t.Cleanup(func() { SetDockerRoot(prev) })
+}
+
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+func TestReadIdentity_StoreWins(t *testing.T) {
+	writeContainerConfig(t, "abc123", `{
+		"Image": "sha256:0123456789abcdef",
+		"Config": {"Labels": {
+			"io.balena.image.class": "from-store",
+			"io.balena.image.kernel-abi-id": "6.6.20-abi"
+		}}
+	}`)
+
+	spec := &specs.Spec{Annotations: map[string]string{"io.balena.image.class": "from-spec"}}
+	id := ReadIdentity(testLogger(), spec, "abc123")
+
+	assert.Equal(t, map[string]string{
+		"io.balena.image.class":         "from-store",
+		"io.balena.image.kernel-abi-id": "6.6.20-abi",
+	}, id.Labels)
+	assert.Equal(t, "sha256:0123456789abcdef", id.ImageID)
+	assert.Equal(t, map[string]string{"io.balena.image.class": "from-spec"}, spec.Annotations)
+}
+
+func TestReadIdentity_NoStoreFallsBackToTheSpec(t *testing.T) {
+	writeContainerConfig(t, "other", `{"Image":"sha256:dead","Config":{"Labels":{"io.balena.image.class":"from-store"}}}`)
+
+	spec := &specs.Spec{Annotations: map[string]string{"io.balena.image.class": "from-spec"}}
+	id := ReadIdentity(testLogger(), spec, "abc123")
+
+	assert.Equal(t, spec.Annotations, id.Labels)
+	assert.Empty(t, id.ImageID)
+}
+
+// TestReadIdentity_StoreWithNoLabels asserts both fields come from one source.
+// A store container with no labels gets no spec fallback.
+func TestReadIdentity_StoreWithNoLabels(t *testing.T) {
+	writeContainerConfig(t, "abc123", `{"Image":"sha256:0123456789abcdef","Config":{"Labels":{}}}`)
+
+	spec := &specs.Spec{Annotations: map[string]string{"io.balena.image.class": "from-spec"}}
+	id := ReadIdentity(testLogger(), spec, "abc123")
+
+	assert.Empty(t, id.Labels)
+	assert.Equal(t, "sha256:0123456789abcdef", id.ImageID)
+}
+
+// TestReadIdentity_InvalidContainerID asserts a crafted id never reaches a
+// path join.
+func TestReadIdentity_InvalidContainerID(t *testing.T) {
+	spec := &specs.Spec{Annotations: map[string]string{"io.balena.image.class": "from-spec"}}
+	id := ReadIdentity(testLogger(), spec, "../../etc")
+
+	assert.Equal(t, spec.Annotations, id.Labels)
+	assert.Empty(t, id.ImageID)
+}
+
+func TestVolumeDataDir(t *testing.T) {
+	root := t.TempDir()
+	prev := getDockerRoot()
+	SetDockerRoot(root)
+	t.Cleanup(func() { SetDockerRoot(prev) })
+
+	got, err := VolumeDataDir("ext_svc_abc_boot")
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(root, "volumes", "ext_svc_abc_boot", "_data"), got)
+}
+
+func TestVolumeRelDir_RefusesNonBareNames(t *testing.T) {
+	for _, name := range []string{"", ".", "..", "a/b", "/abs"} {
+		_, err := VolumeRelDir(name)
+		require.Error(t, err, "name %q must be refused", name)
+		assert.Contains(t, err.Error(), "bare file name")
+	}
 }
