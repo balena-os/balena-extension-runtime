@@ -125,60 +125,73 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
-func TestEnrichAnnotations_LabelsAndImageID(t *testing.T) {
+func TestReadIdentity_StoreWins(t *testing.T) {
 	writeContainerConfig(t, "abc123", `{
-		"Image": "sha256:42befc76f4f8e9a1c0d3b5a7e2f4c6d8a0b2c4e6f8a0b2c4e6f8a0b2c4e6f8a0",
+		"Image": "sha256:0123456789abcdef",
 		"Config": {"Labels": {
-			"io.balena.image.class": "overlay",
+			"io.balena.image.class": "from-store",
 			"io.balena.image.kernel-abi-id": "6.6.20-abi"
 		}}
 	}`)
 
-	spec := &specs.Spec{}
-	stored := EnrichAnnotations(testLogger(), spec, "abc123")
+	spec := &specs.Spec{Annotations: map[string]string{"io.balena.image.class": "from-spec"}}
+	id := ReadIdentity(testLogger(), spec, "abc123")
 
-	assert.Equal(t, "sha256:42befc76f4f8e9a1c0d3b5a7e2f4c6d8a0b2c4e6f8a0b2c4e6f8a0b2c4e6f8a0", stored.ImageID)
-	assert.Equal(t, "overlay", spec.Annotations["io.balena.image.class"])
-	assert.Equal(t, "6.6.20-abi", spec.Annotations["io.balena.image.kernel-abi-id"])
-
-	// The engine's own label map is returned alongside, because volume
-	// identity is derived from it rather than from the annotations.
 	assert.Equal(t, map[string]string{
-		"io.balena.image.class":         "overlay",
+		"io.balena.image.class":         "from-store",
 		"io.balena.image.kernel-abi-id": "6.6.20-abi",
-	}, stored.Labels)
+	}, id.Labels)
+	assert.Equal(t, "sha256:0123456789abcdef", id.ImageID)
+	assert.Equal(t, map[string]string{"io.balena.image.class": "from-spec"}, spec.Annotations)
 }
 
-// TestEnrichAnnotations_KeepsSpecAnnotations asserts annotations already on
-// the spec win over the store's labels, while the store's own view is still
-// returned unchanged: volume identity is derived from it, so a bundle
-// overriding the annotations must not move it.
-func TestEnrichAnnotations_KeepsSpecAnnotations(t *testing.T) {
-	writeContainerConfig(t, "abc123", `{
-		"Image": "sha256:0123456789abcdef",
-		"Config": {"Labels": {"io.balena.image.class": "from-store"}}
-	}`)
+func TestReadIdentity_NoStoreFallsBackToTheSpec(t *testing.T) {
+	writeContainerConfig(t, "other", `{"Image":"sha256:dead","Config":{"Labels":{"io.balena.image.class":"from-store"}}}`)
 
 	spec := &specs.Spec{Annotations: map[string]string{"io.balena.image.class": "from-spec"}}
-	stored := EnrichAnnotations(testLogger(), spec, "abc123")
+	id := ReadIdentity(testLogger(), spec, "abc123")
 
-	assert.Equal(t, "sha256:0123456789abcdef", stored.ImageID)
-	assert.Equal(t, "from-spec", spec.Annotations["io.balena.image.class"])
-	assert.Equal(t, "from-store", stored.Labels["io.balena.image.class"])
+	assert.Equal(t, spec.Annotations, id.Labels)
+	assert.Empty(t, id.ImageID)
 }
 
-func TestEnrichAnnotations_MissingConfig(t *testing.T) {
-	writeContainerConfig(t, "other", `{"Image":"sha256:dead","Config":{"Labels":{}}}`)
+// TestReadIdentity_StoreWithNoLabels asserts both fields come from one source.
+// A store container with no labels gets no spec fallback.
+func TestReadIdentity_StoreWithNoLabels(t *testing.T) {
+	writeContainerConfig(t, "abc123", `{"Image":"sha256:0123456789abcdef","Config":{"Labels":{}}}`)
 
-	spec := &specs.Spec{}
-	assert.Empty(t, EnrichAnnotations(testLogger(), spec, "abc123").ImageID)
-	assert.Empty(t, spec.Annotations)
+	spec := &specs.Spec{Annotations: map[string]string{"io.balena.image.class": "from-spec"}}
+	id := ReadIdentity(testLogger(), spec, "abc123")
+
+	assert.Empty(t, id.Labels)
+	assert.Equal(t, "sha256:0123456789abcdef", id.ImageID)
 }
 
-// TestEnrichAnnotations_InvalidContainerID asserts a crafted id never reaches
-// a path join.
-func TestEnrichAnnotations_InvalidContainerID(t *testing.T) {
-	spec := &specs.Spec{}
-	assert.Empty(t, EnrichAnnotations(testLogger(), spec, "../../etc").ImageID)
-	assert.Empty(t, spec.Annotations)
+// TestReadIdentity_InvalidContainerID asserts a crafted id never reaches a
+// path join.
+func TestReadIdentity_InvalidContainerID(t *testing.T) {
+	spec := &specs.Spec{Annotations: map[string]string{"io.balena.image.class": "from-spec"}}
+	id := ReadIdentity(testLogger(), spec, "../../etc")
+
+	assert.Equal(t, spec.Annotations, id.Labels)
+	assert.Empty(t, id.ImageID)
+}
+
+func TestVolumeDataDir(t *testing.T) {
+	root := t.TempDir()
+	prev := getDockerRoot()
+	SetDockerRoot(root)
+	t.Cleanup(func() { SetDockerRoot(prev) })
+
+	got, err := VolumeDataDir("ext_svc_abc_boot")
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(root, "volumes", "ext_svc_abc_boot", "_data"), got)
+}
+
+func TestVolumeRelDir_RefusesNonBareNames(t *testing.T) {
+	for _, name := range []string{"", ".", "..", "a/b", "/abs"} {
+		_, err := VolumeRelDir(name)
+		require.Error(t, err, "name %q must be refused", name)
+		assert.Contains(t, err.Error(), "bare file name")
+	}
 }

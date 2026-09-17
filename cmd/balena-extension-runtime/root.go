@@ -56,7 +56,7 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&logFormat, "log-format", "text",
 		"Log format: text or json")
 	rootCmd.PersistentFlags().StringVar(&dockerRoot, "docker-root", "/var/lib/docker",
-		"Docker data root directory for label fallback via config.v2.json")
+		"Docker data root holding the container store and the engine's volumes")
 	// --systemd-cgroup is passed by containerd; accepted and ignored (extensions
 	// are short-lived proxy processes and do not require cgroup delegation).
 	rootCmd.PersistentFlags().Bool("systemd-cgroup", false,

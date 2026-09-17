@@ -9,10 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/balena-os/balena-extension-runtime/internal/labels"
 	"github.com/balena-os/balena-extension-runtime/internal/manager"
 	"github.com/balena-os/balena-extension-runtime/internal/oci"
-	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -25,9 +23,13 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-// stubEngine records the volume fabrication asks for and hands back a
-// mountpoint under a temporary directory, standing in for the engine's own
-// volume root.
+// defaultDockerRoot is the production default. A test that redirects the
+// docker root restores it.
+const defaultDockerRoot = "/var/lib/docker"
+
+// stubEngine stands in for the engine's volume layout. It records the volume
+// fabrication asks for, and creates that volume's data directory under a
+// temporary docker root.
 type stubEngine struct {
 	root    string
 	created map[string]map[string]string
@@ -38,29 +40,32 @@ type stubEngine struct {
 func newStubEngine(t *testing.T) *stubEngine {
 	t.Helper()
 	s := &stubEngine{root: t.TempDir(), created: map[string]map[string]string{}}
+	oci.SetDockerRoot(s.root)
 	prev := createVolume
 	createVolume = func(_ context.Context, name string, volumeLabels map[string]string) (*manager.Volume, error) {
 		if s.err != nil {
 			return nil, s.err
 		}
-		mountpoint := filepath.Join(s.root, name, "_data")
+		dataDir := s.dataDir(name)
 		if _, seen := s.created[name]; !seen {
-			// Create-or-get: only the first call records labels, mirroring
-			// the engine ignoring them for an existing volume.
+			// Create-or-get: only the first call records labels.
 			s.created[name] = volumeLabels
 			s.order = append(s.order, name)
-			if err := os.MkdirAll(mountpoint, 0o755); err != nil {
+			if err := os.MkdirAll(dataDir, 0o755); err != nil {
 				return nil, err
 			}
 		}
-		return &manager.Volume{Name: name, Mountpoint: mountpoint, Labels: s.created[name]}, nil
+		return &manager.Volume{Name: name, Labels: s.created[name]}, nil
 	}
-	t.Cleanup(func() { createVolume = prev })
+	t.Cleanup(func() {
+		createVolume = prev
+		oci.SetDockerRoot(defaultDockerRoot)
+	})
 	return s
 }
 
-func (s *stubEngine) mountpoint(name string) string {
-	return filepath.Join(s.root, name, "_data")
+func (s *stubEngine) dataDir(name string) string {
+	return filepath.Join(s.root, "volumes", name, "_data")
 }
 
 // extensionRootfs builds a rootfs holding /boot with a kernel file, a nested
@@ -93,57 +98,87 @@ func kernelOverride(extra ...string) map[string]string {
 	return annotations
 }
 
-func specWith(annotations map[string]string, mounts ...specs.Mount) *specs.Spec {
-	return &specs.Spec{Annotations: annotations, Mounts: mounts}
-}
-
-// stored is what the container store contributes: an image id and no labels,
-// which is the shape a synthetic bundle produces. Identity then falls back to
-// the spec's annotations, so these tests exercise that path. The case where
-// the store does have labels is covered by
-// TestFabricateBootVolume_StoreLabelsWinOverAnnotations.
-func stored(imageID string) oci.StoredConfig {
-	return oci.StoredConfig{ImageID: imageID}
+// identity is what create resolves before fabrication. A read of the container
+// store yields the same shape.
+func identity(lbls map[string]string, imageID string) oci.Identity {
+	return oci.Identity{Labels: lbls, ImageID: imageID}
 }
 
 func TestFabricateBootVolume_FillsFromRootfs(t *testing.T) {
 	stub := newStubEngine(t)
 	rootfs := extensionRootfs(t)
-	spec := specWith(kernelOverride("maintainer", "someone"))
 
-	source, err := fabricateBootVolume(context.Background(), testLogger(), spec, stored("sha256:42befc76f4f8aaaa"), rootfs, "0123456789abcdef")
+	name, err := fabricateBootVolume(context.Background(), testLogger(),
+		identity(kernelOverride("maintainer", "someone"), "sha256:42befc76f4f8aaaa"), rootfs, "0123456789abcdef")
 	require.NoError(t, err)
 
-	name := "ext_kernel-modules_42befc76f4f8_boot"
 	require.Equal(t, []string{name}, stub.order, "exactly one volume, backing /boot")
-	assert.Equal(t, stub.mountpoint(name), source)
 
-	// The volume carries the image labels the commit sweep applies its
-	// staleness predicate to, and nothing else: the sweep reaches it by
-	// re-deriving its name, so no bookkeeping label has to survive on it.
+	// Cleanup and the supervisor read only the class label.
+	// The other image labels are for operators.
 	assert.Equal(t, map[string]string{
 		"io.balena.image.class":         "overlay",
 		"io.balena.image.kernel-abi-id": "6.6.20-integration",
 	}, stub.created[name])
 
-	kernel, err := os.ReadFile(filepath.Join(stub.mountpoint(name), "kernel"))
+	kernel, err := os.ReadFile(filepath.Join(stub.dataDir(name), "kernel"))
 	require.NoError(t, err)
 	assert.Equal(t, "vmlinuz", string(kernel))
 
-	dtb, err := os.ReadFile(filepath.Join(stub.mountpoint(name), "dtb", "board.dtb"))
+	dtb, err := os.ReadFile(filepath.Join(stub.dataDir(name), "dtb", "board.dtb"))
 	require.NoError(t, err)
 	assert.Equal(t, "fdt", string(dtb))
 
-	info, err := os.Stat(filepath.Join(stub.mountpoint(name), "dtb", "board.dtb"))
+	info, err := os.Stat(filepath.Join(stub.dataDir(name), "dtb", "board.dtb"))
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm(), "mode must be preserved")
 
-	target, err := os.Readlink(filepath.Join(stub.mountpoint(name), "vmlinuz"))
+	target, err := os.Readlink(filepath.Join(stub.dataDir(name), "vmlinuz"))
 	require.NoError(t, err)
 	assert.Equal(t, "kernel", target, "a boot tree's kernel alias must survive the copy")
 
-	assert.NoFileExists(t, filepath.Join(stub.mountpoint(name), fabricatingMarker),
+	assert.NoFileExists(t, filepath.Join(stub.dataDir(name), fabricatingMarker),
 		"the marker must be gone once the fill completes")
+}
+
+// TestFabricateBootVolume_ReturnsTheName pins what create hands to start: the
+// volume's name. No path crosses that record, because activate rebuilds every
+// path from the name.
+func TestFabricateBootVolume_ReturnsTheName(t *testing.T) {
+	newStubEngine(t)
+
+	name, err := fabricateBootVolume(context.Background(), testLogger(),
+		identity(kernelOverride(), "sha256:42befc76f4f8aaaa"), extensionRootfs(t), "0123456789abcdef")
+	require.NoError(t, err)
+
+	assert.Equal(t, "ext_kernel-modules_42befc76f4f8_boot", name)
+}
+
+// TestFabricateBootVolume_VolumeOutsideTheDockerRoot covers an engine whose
+// volume layout is not the one this OS was built against. The fill only reads
+// the path under the docker root, so it fails there and copies nothing.
+func TestFabricateBootVolume_VolumeOutsideTheDockerRoot(t *testing.T) {
+	stub := newStubEngine(t)
+	elsewhere := t.TempDir()
+	prev := createVolume
+	createVolume = func(_ context.Context, name string, volumeLabels map[string]string) (*manager.Volume, error) {
+		dataDir := filepath.Join(elsewhere, "volumes", name, "_data")
+		if err := os.MkdirAll(dataDir, 0o755); err != nil {
+			return nil, err
+		}
+		return &manager.Volume{Name: name, Labels: volumeLabels}, nil
+	}
+	t.Cleanup(func() { createVolume = prev })
+
+	_, err := fabricateBootVolume(context.Background(), testLogger(),
+		identity(kernelOverride(), "sha256:42befc76f4f8aaaa"), extensionRootfs(t), "abc")
+	require.Error(t, err)
+
+	const name = "ext_kernel-modules_42befc76f4f8_boot"
+	assert.Contains(t, err.Error(), stub.dataDir(name))
+	empty, err := isEmpty(filepath.Join(elsewhere, "volumes", name, "_data"))
+	require.NoError(t, err)
+	assert.True(t, empty, "a volume the docker root does not cover must not be filled")
 }
 
 // TestFillVolume_CopiesSymlinksWithoutFollowing pins the copier against the
@@ -156,11 +191,11 @@ func TestFabricateBootVolume_FillsFromRootfs(t *testing.T) {
 // chose, and following a relative one would turn a hardlink-cheap alias into a
 // second copy of the kernel.
 func TestFillVolume_CopiesSymlinksWithoutFollowing(t *testing.T) {
-	mountpoint := t.TempDir()
+	dataDir := t.TempDir()
 	src := filepath.Join(extensionRootfs(t), "boot")
 	require.NoError(t, os.Symlink("initrd-6.6.20", filepath.Join(src, "initrd")))
 
-	require.NoError(t, fillVolume(testLogger(), src, mountpoint))
+	require.NoError(t, fillVolume(testLogger(), src, dataDir))
 
 	for _, tc := range []struct {
 		name, link, target string
@@ -170,7 +205,7 @@ func TestFillVolume_CopiesSymlinksWithoutFollowing(t *testing.T) {
 		{"dangling target", "initrd", "initrd-6.6.20"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			path := filepath.Join(mountpoint, tc.link)
+			path := filepath.Join(dataDir, tc.link)
 			info, err := os.Lstat(path)
 			require.NoError(t, err)
 			require.Equal(t, os.ModeSymlink, info.Mode()&os.ModeSymlink,
@@ -187,15 +222,15 @@ func TestFillVolume_CopiesSymlinksWithoutFollowing(t *testing.T) {
 // honest: a device or a socket has no meaning once copied, so it is stepped
 // past rather than turned into an error that fails the create.
 func TestFillVolume_SkipsNonRegularFiles(t *testing.T) {
-	mountpoint := t.TempDir()
+	dataDir := t.TempDir()
 	src := filepath.Join(extensionRootfs(t), "boot")
 	require.NoError(t, syscall.Mkfifo(filepath.Join(src, "pipe"), 0o644))
 
-	require.NoError(t, fillVolume(testLogger(), src, mountpoint))
+	require.NoError(t, fillVolume(testLogger(), src, dataDir))
 
-	_, err := os.Lstat(filepath.Join(mountpoint, "pipe"))
+	_, err := os.Lstat(filepath.Join(dataDir, "pipe"))
 	assert.True(t, errors.Is(err, os.ErrNotExist), "a fifo must not be recreated")
-	assert.FileExists(t, filepath.Join(mountpoint, "kernel"), "the rest of the tree still copies")
+	assert.FileExists(t, filepath.Join(dataDir, "kernel"), "the rest of the tree still copies")
 }
 
 // TestFabricateBootVolume_NoKernelABIID pins the admission rule: a
@@ -203,15 +238,15 @@ func TestFillVolume_SkipsNonRegularFiles(t *testing.T) {
 // engine is never called.
 func TestFabricateBootVolume_NoKernelABIID(t *testing.T) {
 	stub := newStubEngine(t)
-	spec := specWith(map[string]string{
+	id := identity(map[string]string{
 		"io.balena.image.class":  "overlay",
 		"io.balena.service-name": "userspace-only",
-	})
+	}, "sha256:42befc76f4f8aaaa")
 
-	source, err := fabricateBootVolume(context.Background(), testLogger(), spec, stored("sha256:42befc76f4f8aaaa"), extensionRootfs(t), "0123456789abcdef")
+	name, err := fabricateBootVolume(context.Background(), testLogger(), id, extensionRootfs(t), "0123456789abcdef")
 	require.NoError(t, err)
 
-	assert.Empty(t, source)
+	assert.Empty(t, name)
 	assert.Empty(t, stub.order, "an extension without a kernel must not reach the engine")
 }
 
@@ -222,48 +257,10 @@ func TestFabricateBootVolume_ServiceNameFallback(t *testing.T) {
 	annotations := kernelOverride()
 	delete(annotations, "io.balena.service-name")
 
-	_, err := fabricateBootVolume(context.Background(), testLogger(), specWith(annotations), stored("sha256:42befc76f4f8aaaa"), extensionRootfs(t), "0123456789abcdeffedcba")
+	_, err := fabricateBootVolume(context.Background(), testLogger(), identity(annotations, "sha256:42befc76f4f8aaaa"), extensionRootfs(t), "0123456789abcdeffedcba")
 	require.NoError(t, err)
 
 	assert.Equal(t, []string{"ext_0123456789ab_42befc76f4f8_boot"}, stub.order)
-}
-
-// TestFabricateBootVolume_StoreLabelsWinOverAnnotations closes the drift the
-// two sides could otherwise develop. Cleanup's retention guard derives the
-// volume's name from the engine's label map, so create has to derive it from
-// the same map: a bundle whose annotations disagree must not move the name, or
-// the guard holds back a name nothing carries and the sweep collects the /boot
-// volume of a live extension.
-//
-// The two maps are equal in production only because the engine sets no
-// annotations at all, which is a property of today's engine rather than of
-// this contract.
-func TestFabricateBootVolume_StoreLabelsWinOverAnnotations(t *testing.T) {
-	stub := newStubEngine(t)
-
-	// The bundle names a different service, and claims no kernel.
-	spec := specWith(map[string]string{
-		"io.balena.image.class":  "overlay",
-		"io.balena.service-name": "from-the-bundle",
-	})
-	fromTheEngine := oci.StoredConfig{
-		ImageID: "sha256:42befc76f4f8aaaa",
-		Labels: map[string]string{
-			"io.balena.image.class":         "overlay",
-			"io.balena.image.kernel-abi-id": "6.6.20-integration",
-			"io.balena.service-name":        "kernel-modules",
-		},
-	}
-
-	source, err := fabricateBootVolume(context.Background(), testLogger(), spec,
-		fromTheEngine, extensionRootfs(t), "0123456789abcdef")
-	require.NoError(t, err)
-
-	// The engine's labels admitted it and named it, exactly as the manager's
-	// volume sweep re-derives from the same map.
-	name := labels.VolumeName("kernel-modules", fromTheEngine.ImageID)
-	assert.Equal(t, []string{name}, stub.order)
-	assert.Equal(t, stub.mountpoint(name), source)
 }
 
 // TestFabricateBootVolume_Idempotent asserts a second create reuses the volume
@@ -273,22 +270,22 @@ func TestFabricateBootVolume_StoreLabelsWinOverAnnotations(t *testing.T) {
 func TestFabricateBootVolume_Idempotent(t *testing.T) {
 	stub := newStubEngine(t)
 	rootfs := extensionRootfs(t)
-	spec := specWith(kernelOverride())
+	id := identity(kernelOverride(), "sha256:42befc76f4f8aaaa")
 
-	_, err := fabricateBootVolume(context.Background(), testLogger(), spec, stored("sha256:42befc76f4f8aaaa"), rootfs, "abc")
+	_, err := fabricateBootVolume(context.Background(), testLogger(), id, rootfs, "abc")
 	require.NoError(t, err)
 
 	name := "ext_kernel-modules_42befc76f4f8_boot"
-	written := filepath.Join(stub.mountpoint(name), "written-after-fill")
+	written := filepath.Join(stub.dataDir(name), "written-after-fill")
 	require.NoError(t, os.WriteFile(written, []byte("state"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(stub.mountpoint(name), "kernel"), []byte("patched"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(stub.dataDir(name), "kernel"), []byte("patched"), 0o644))
 
-	_, err = fabricateBootVolume(context.Background(), testLogger(), spec, stored("sha256:42befc76f4f8aaaa"), rootfs, "abc")
+	_, err = fabricateBootVolume(context.Background(), testLogger(), id, rootfs, "abc")
 	require.NoError(t, err)
 
 	assert.Equal(t, []string{name}, stub.order, "the same image must key the same volume")
 	assert.FileExists(t, written, "a filled volume must be left alone")
-	kernel, err := os.ReadFile(filepath.Join(stub.mountpoint(name), "kernel"))
+	kernel, err := os.ReadFile(filepath.Join(stub.dataDir(name), "kernel"))
 	require.NoError(t, err)
 	assert.Equal(t, "patched", string(kernel), "content must not be re-copied over")
 }
@@ -299,24 +296,24 @@ func TestFabricateBootVolume_Idempotent(t *testing.T) {
 func TestFabricateBootVolume_MarkerRecovery(t *testing.T) {
 	stub := newStubEngine(t)
 	rootfs := extensionRootfs(t)
-	spec := specWith(kernelOverride())
+	id := identity(kernelOverride(), "sha256:42befc76f4f8aaaa")
 
 	name := "ext_kernel-modules_42befc76f4f8_boot"
-	mountpoint := stub.mountpoint(name)
-	require.NoError(t, os.MkdirAll(mountpoint, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(mountpoint, fabricatingMarker), nil, 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(mountpoint, "kernel"), []byte("trunc"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(mountpoint, "leftover"), []byte("junk"), 0o644))
+	dataDir := stub.dataDir(name)
+	require.NoError(t, os.MkdirAll(dataDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dataDir, fabricatingMarker), nil, 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dataDir, "kernel"), []byte("trunc"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dataDir, "leftover"), []byte("junk"), 0o644))
 
-	_, err := fabricateBootVolume(context.Background(), testLogger(), spec, stored("sha256:42befc76f4f8aaaa"), rootfs, "abc")
+	_, err := fabricateBootVolume(context.Background(), testLogger(), id, rootfs, "abc")
 	require.NoError(t, err)
 
-	kernel, err := os.ReadFile(filepath.Join(mountpoint, "kernel"))
+	kernel, err := os.ReadFile(filepath.Join(dataDir, "kernel"))
 	require.NoError(t, err)
 	assert.Equal(t, "vmlinuz", string(kernel), "a partial fill must be refilled from the rootfs")
-	assert.NoFileExists(t, filepath.Join(mountpoint, "leftover"),
+	assert.NoFileExists(t, filepath.Join(dataDir, "leftover"),
 		"the wipe must clear what the interrupted copy left behind")
-	assert.NoFileExists(t, filepath.Join(mountpoint, fabricatingMarker))
+	assert.NoFileExists(t, filepath.Join(dataDir, fabricatingMarker))
 }
 
 // TestFabricateBootVolume_MissingRootfsPath asserts a kernel override whose
@@ -325,11 +322,11 @@ func TestFabricateBootVolume_MarkerRecovery(t *testing.T) {
 func TestFabricateBootVolume_MissingRootfsPath(t *testing.T) {
 	stub := newStubEngine(t)
 
-	source, err := fabricateBootVolume(context.Background(), testLogger(), specWith(kernelOverride()), stored("sha256:42befc76f4f8aaaa"), t.TempDir(), "abc")
+	name, err := fabricateBootVolume(context.Background(), testLogger(), identity(kernelOverride(), "sha256:42befc76f4f8aaaa"), t.TempDir(), "abc")
 	require.NoError(t, err)
 
-	require.NotEmpty(t, source)
-	empty, err := isEmpty(stub.mountpoint("ext_kernel-modules_42befc76f4f8_boot"))
+	require.NotEmpty(t, name)
+	empty, err := isEmpty(stub.dataDir("ext_kernel-modules_42befc76f4f8_boot"))
 	require.NoError(t, err)
 	assert.True(t, empty)
 }
@@ -344,7 +341,7 @@ func TestFabricateBootVolume_MarkerNameCollision(t *testing.T) {
 	require.NoError(t, os.WriteFile(
 		filepath.Join(rootfs, "boot", fabricatingMarker), []byte("mine"), 0o644))
 
-	_, err := fabricateBootVolume(context.Background(), testLogger(), specWith(kernelOverride()), stored("sha256:42befc76f4f8aaaa"), rootfs, "abc")
+	_, err := fabricateBootVolume(context.Background(), testLogger(), identity(kernelOverride(), "sha256:42befc76f4f8aaaa"), rootfs, "abc")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), fabricatingMarker)
 }
@@ -355,16 +352,16 @@ func TestFabricateBootVolume_MarkerNameCollision(t *testing.T) {
 // wipes the tree the other is copying into and both then finish believing the
 // volume is complete.
 func TestFillVolume_ExcludesAConcurrentFill(t *testing.T) {
-	mountpoint := t.TempDir()
+	dataDir := t.TempDir()
 	src := filepath.Join(extensionRootfs(t), "boot")
 
-	// Stand in for the other create, which holds the volume for its own fill.
-	holder, err := os.Open(mountpoint)
+	// Stand in for the other create's fill.
+	holder, err := os.Open(dataDir)
 	require.NoError(t, err)
 	require.NoError(t, syscall.Flock(int(holder.Fd()), syscall.LOCK_EX))
 
 	done := make(chan error, 1)
-	go func() { done <- fillVolume(testLogger(), src, mountpoint) }()
+	go func() { done <- fillVolume(testLogger(), src, dataDir) }()
 
 	select {
 	case <-done:
@@ -376,7 +373,7 @@ func TestFillVolume_ExcludesAConcurrentFill(t *testing.T) {
 	require.NoError(t, holder.Close())
 	require.NoError(t, <-done, "the fill must proceed once the volume is released")
 
-	kernel, err := os.ReadFile(filepath.Join(mountpoint, "kernel"))
+	kernel, err := os.ReadFile(filepath.Join(dataDir, "kernel"))
 	require.NoError(t, err)
 	assert.Equal(t, "vmlinuz", string(kernel))
 }
@@ -385,7 +382,7 @@ func TestFabricateBootVolume_EngineFailure(t *testing.T) {
 	stub := newStubEngine(t)
 	stub.err = errors.New("engine unavailable")
 
-	_, err := fabricateBootVolume(context.Background(), testLogger(), specWith(kernelOverride()), stored("sha256:42befc76f4f8aaaa"), extensionRootfs(t), "abc")
+	_, err := fabricateBootVolume(context.Background(), testLogger(), identity(kernelOverride(), "sha256:42befc76f4f8aaaa"), extensionRootfs(t), "abc")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "engine unavailable")
 }
@@ -396,7 +393,7 @@ func TestFabricateBootVolume_EngineFailure(t *testing.T) {
 func TestFabricateBootVolume_NoImageID(t *testing.T) {
 	newStubEngine(t)
 
-	_, err := fabricateBootVolume(context.Background(), testLogger(), specWith(kernelOverride()), stored(""), extensionRootfs(t), "abc")
+	_, err := fabricateBootVolume(context.Background(), testLogger(), identity(kernelOverride(), ""), extensionRootfs(t), "abc")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "image id")
 }
@@ -414,8 +411,8 @@ func TestFabricateBootVolume_FillsUnderTheOperationLock(t *testing.T) {
 	withOperationLock = func(ctx context.Context, fn func() error) error {
 		held = true
 		err := fn()
-		// A fill that ran outside the lock would not have put the kernel there yet.
-		_, statErr := os.Stat(filepath.Join(stub.mountpoint(name), "kernel"))
+		// A fill outside the lock would not have run yet.
+		_, statErr := os.Stat(filepath.Join(stub.dataDir(name), "kernel"))
 		filledOnRelease = statErr == nil
 		held = false
 		return err
@@ -430,7 +427,7 @@ func TestFabricateBootVolume_FillsUnderTheOperationLock(t *testing.T) {
 	t.Cleanup(func() { createVolume = prevCreate })
 
 	_, err := fabricateBootVolume(context.Background(), testLogger(),
-		specWith(kernelOverride()), stored("sha256:42befc76f4f8aaaa"), rootfs, "0123456789abcdef")
+		identity(kernelOverride(), "sha256:42befc76f4f8aaaa"), rootfs, "0123456789abcdef")
 	require.NoError(t, err)
 
 	assert.True(t, createdInside, "create-or-get must run under the operation lock")

@@ -56,41 +56,6 @@ func TestValidate(t *testing.T) {
 	}
 }
 
-// TestResolveServiceName_PrefersTheLabel covers the ordinary deploy, where the
-// compose service name is what the volume is keyed on.
-func TestResolveServiceName_PrefersTheLabel(t *testing.T) {
-	name, fellBack := ResolveServiceName(
-		map[string]string{ServiceName: "kernel-modules"}, "0123456789abcdef")
-	assert.Equal(t, "kernel-modules", name)
-	assert.False(t, fellBack)
-}
-
-// TestResolveServiceName_FallsBackToContainerID covers a manual deploy that
-// carries no service name.
-func TestResolveServiceName_FallsBackToContainerID(t *testing.T) {
-	name, fellBack := ResolveServiceName(nil, "0123456789abcdef0000")
-	assert.Equal(t, "0123456789ab", name)
-	assert.True(t, fellBack)
-}
-
-// TestResolveServiceName_ShortContainerIDIsUsedWhole guards the slice: an id
-// shorter than the fallback width must not panic.
-func TestResolveServiceName_ShortContainerIDIsUsedWhole(t *testing.T) {
-	name, fellBack := ResolveServiceName(map[string]string{ServiceName: ""}, "abc")
-	assert.Equal(t, "abc", name)
-	assert.True(t, fellBack)
-}
-
-// TestResolveServiceName_IsStableAcrossCallers is the property both sides
-// depend on: fabrication and cleanup's retention guard derive the same key
-// from the same container, or the volume cannot be found again.
-func TestResolveServiceName_IsStableAcrossCallers(t *testing.T) {
-	lbls := map[string]string{"io.balena.image.class": "overlay"}
-	first, _ := ResolveServiceName(lbls, "deadbeefcafe0000")
-	second, _ := ResolveServiceName(lbls, "deadbeefcafe0000")
-	assert.Equal(t, first, second)
-}
-
 // TestVolumeName_Format is a worked example of the name, so the shape is
 // readable without deriving it by hand.
 func TestVolumeName_Format(t *testing.T) {
@@ -116,13 +81,60 @@ func TestVolumeName_ShortImageID(t *testing.T) {
 	assert.Equal(t, "ext_svc_abc_boot", VolumeName("svc", "sha256:abc"))
 }
 
-// TestVolumeName_MatchesTheServiceFallback is the composed contract the
-// retention guard relies on for a manual deploy.
-func TestVolumeName_MatchesTheServiceFallback(t *testing.T) {
-	service, fellBack := ResolveServiceName(nil, "0123456789abcdeffedcba")
-	require.True(t, fellBack)
-	assert.Equal(t, "ext_0123456789ab_42befc76f4f8_boot",
-		VolumeName(service, "sha256:42befc76f4f8aaaa"))
+// TestBootVolume covers the name both create and the retention guard derive,
+// including the service fallback and the missing image id.
+func TestBootVolume(t *testing.T) {
+	tests := []struct {
+		name        string
+		lbls        map[string]string
+		containerID string
+		imageID     string
+		want        string
+		wantErr     string
+	}{
+		{
+			name:        "not owed",
+			lbls:        map[string]string{Class: ClassOverlay},
+			containerID: "0123456789abcdeffedcba",
+			imageID:     "sha256:42befc76f4f8aaaa",
+		},
+		{
+			name: "service label",
+			lbls: map[string]string{
+				KernelABIID: "6.6.20-abc",
+				ServiceName: "kernel-modules",
+			},
+			containerID: "0123456789abcdeffedcba",
+			imageID:     "sha256:42befc76f4f8aaaa",
+			want:        "ext_kernel-modules_42befc76f4f8_boot",
+		},
+		{
+			name:        "container id fallback",
+			lbls:        map[string]string{KernelABIID: "6.6.20-abc"},
+			containerID: "0123456789abcdeffedcba",
+			imageID:     "sha256:42befc76f4f8aaaa",
+			want:        "ext_0123456789ab_42befc76f4f8_boot",
+		},
+		{
+			name:        "no image id",
+			lbls:        map[string]string{KernelABIID: "6.6.20-abc"},
+			containerID: "0123456789abcdeffedcba",
+			wantErr:     "image id",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			name, err := BootVolume(tt.lbls, tt.containerID, tt.imageID)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, name)
+		})
+	}
 }
 
 // TestFabricatesVolume is the admission rule create and cleanup share. A

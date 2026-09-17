@@ -39,20 +39,20 @@ func Create(ctx context.Context, logger *slog.Logger, containerID string, bundle
 		return fmt.Errorf("failed to read OCI spec: %w", err)
 	}
 
-	// balena-engine does not copy container labels into OCI spec annotations.
-	stored := oci.EnrichAnnotations(logger, spec, containerID)
+	// Resolve the identity once. Every later step reads it.
+	id := oci.ReadIdentity(logger, spec, containerID)
 
 	rootfs, err := oci.ResolveRootfs(spec, bundlePath)
 	if err != nil {
 		return fmt.Errorf("resolve rootfs: %w", err)
 	}
 
-	if err := labels.Validate(spec.Annotations); err != nil {
+	if err := labels.Validate(id.Labels); err != nil {
 		return fmt.Errorf("invalid extension: %w", err)
 	}
 
 	// Fabricate before the spawn: a failure leaves no proxy.
-	bootVolume, err := fabricateBootVolume(ctx, logger, spec, stored, rootfs, containerID)
+	name, err := fabricateBootVolume(ctx, logger, id, rootfs, containerID)
 	if err != nil {
 		return fmt.Errorf("fabricate boot volume: %w", err)
 	}
@@ -80,12 +80,16 @@ func Create(ctx context.Context, logger *slog.Logger, containerID string, bundle
 	state := oci.NewState(containerID, bundlePath)
 	state.Pid = pid
 	state.Status = specs.StateCreated
-	state.Annotations = spec.Annotations
+	state.Annotations = id.Labels
+	if state.Annotations == nil {
+		// state.json carries an object, never null.
+		state.Annotations = map[string]string{}
+	}
 	if err := oci.WriteState(state); err != nil {
 		return err
 	}
-	if bootVolume != "" {
-		if err := oci.WriteBootVolume(containerID, bootVolume); err != nil {
+	if name != "" {
+		if err := oci.WriteBootVolume(containerID, name); err != nil {
 			return err
 		}
 	}
