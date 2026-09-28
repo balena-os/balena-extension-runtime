@@ -74,9 +74,7 @@ func TestCreate_WriteStateFailure_StopsProxy(t *testing.T) {
 
 	bundle := validBundleWithAnnotations(t)
 
-	// A '/' in the ID is rejected by ValidateContainerID inside WriteState
-	// but passes everything upstream (annotations are already populated in
-	// the spec, so EnrichAnnotations returns immediately without ID use).
+	// WriteState rejects the '/'; every step above it passes.
 	err := Create(context.Background(), testLogger(), "bad/id", bundle, "")
 	require.Error(t, err)
 
@@ -147,30 +145,102 @@ func TestCreate_SpawnFailure_NoStopCalled(t *testing.T) {
 		"Stop must not be invoked when proxy spawn itself failed")
 }
 
-func TestCreate_HookFailure_NoProxySpawned(t *testing.T) {
+// TestCreate_FabricationFailure_NoProxySpawned asserts a kernel-claiming
+// extension that fails to fabricate its /boot volume never reaches the
+// proxy: fabrication runs before the spawn, so this failure leaves nothing
+// to clean up.
+func TestCreate_FabricationFailure_NoProxySpawned(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 
-	fp := &fakeProxy{spawnPID: 5555}
+	fp := &fakeProxy{spawnPID: 6161}
 	fp.install(t)
 
-	bundle := validBundleWithAnnotations(t)
-	hooksDir := filepath.Join(bundle, "rootfs", "hooks")
-	require.NoError(t, os.MkdirAll(hooksDir, 0o755))
-	require.NoError(t, os.WriteFile(
-		filepath.Join(hooksDir, "create"),
-		[]byte("#!/bin/sh\nexit 1\n"),
-		0o755,
-	))
+	// An empty store has no image id, so fabrication fails.
+	oci.SetDockerRoot(t.TempDir())
+	t.Cleanup(func() { oci.SetDockerRoot("/var/lib/docker") })
 
-	err := Create(context.Background(), testLogger(), "good-id", bundle, "")
-	require.Error(t, err)
+	bundle := t.TempDir()
+	rootfs := filepath.Join(bundle, "rootfs")
+	require.NoError(t, os.MkdirAll(rootfs, 0o755))
 
-	assert.Zero(t, fp.spawnCalls,
-		"proxy must not be spawned when hooks/create fails")
-	assert.Empty(t, fp.stoppedPIDs,
-		"Stop must not be invoked — there is no proxy to clean up")
+	annotations := map[string]string{
+		"io.balena.image.class":         "overlay",
+		"io.balena.image.kernel-abi-id": "6.6.20-test",
+		"io.balena.service-name":        "kernel-modules",
+	}
+	spec := specs.Spec{
+		Version:     specs.Version,
+		Root:        &specs.Root{Path: "rootfs"},
+		Annotations: annotations,
+	}
+	data, err := json.Marshal(spec)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(bundle, "config.json"), data, 0o644))
 
-	_, readErr := oci.ReadState("good-id")
-	require.Error(t, readErr, "no state should be written when hooks/create fails")
+	containerID := "fabrication-fail-test"
+	err = Create(context.Background(), testLogger(), containerID, bundle, "")
+	require.ErrorContains(t, err, "fabricate boot volume")
+
+	assert.Zero(t, fp.spawnCalls, "proxy must not be spawned when fabrication fails")
+
+	_, readErr := oci.ReadState(containerID)
+	require.Error(t, readErr, "no state should be written when fabrication fails")
 }
 
+// writeStore lays down the container store record the engine keeps, which is
+// the identity ReadIdentity resolves.
+func writeStore(t *testing.T, dockerRoot, containerID, imageID string, lbls map[string]string) {
+	t.Helper()
+	dir := filepath.Join(dockerRoot, "containers", containerID)
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	config := map[string]any{"Image": imageID, "Config": map[string]any{"Labels": lbls}}
+	data, err := json.Marshal(config)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.v2.json"), data, 0o644))
+}
+
+// TestCreate_RecordsTheStoreIdentity pins which map the rest of the lifecycle
+// reads. The engine's labels admit the extension and name its volume. The
+// bundle's annotations disagree and change neither.
+func TestCreate_RecordsTheStoreIdentity(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+
+	fp := &fakeProxy{spawnPID: 5150}
+	fp.install(t)
+
+	stub := newStubEngine(t)
+	const containerID = "store-identity"
+	storeLabels := map[string]string{
+		"io.balena.image.class":         "overlay",
+		"io.balena.image.kernel-abi-id": "6.6.20-integration",
+		"io.balena.service-name":        "kernel-modules",
+	}
+	writeStore(t, stub.root, containerID, "sha256:42befc76f4f8aaaa", storeLabels)
+
+	bundle := t.TempDir()
+	rootfs := filepath.Join(bundle, "rootfs")
+	require.NoError(t, os.MkdirAll(rootfs, 0o755))
+	spec := specs.Spec{
+		Version: specs.Version,
+		Root:    &specs.Root{Path: "rootfs"},
+		// The bundle names a different service and claims no kernel.
+		Annotations: map[string]string{
+			"io.balena.image.class":  "overlay",
+			"io.balena.service-name": "from-the-bundle",
+		},
+	}
+	data, err := json.Marshal(spec)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(bundle, "config.json"), data, 0o644))
+
+	require.NoError(t, Create(context.Background(), testLogger(), containerID, bundle, ""))
+
+	state, err := oci.ReadState(containerID)
+	require.NoError(t, err)
+	assert.Equal(t, storeLabels, state.Annotations)
+
+	name, err := oci.ReadBootVolume(containerID)
+	require.NoError(t, err)
+	assert.Equal(t, "ext_kernel-modules_42befc76f4f8_boot", name)
+	assert.Equal(t, []string{name}, stub.order, "the store's labels name the volume")
+}

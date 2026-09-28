@@ -19,6 +19,56 @@ import (
 // process can carry this pid, so signalling it always fails with ESRCH.
 const unallocatablePid = 4194304
 
+// TestMain turns the test binary into a proxy stand-in.
+func TestMain(m *testing.M) {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "proxy":
+			os.Exit(Run())
+		case "slow":
+			time.Sleep(300 * time.Millisecond)
+			os.Exit(Run())
+		case "exit-early":
+			os.Exit(0)
+		case "never-ready":
+			// A timer, so the runtime reports no deadlock.
+			time.Sleep(time.Hour)
+			os.Exit(0)
+		}
+	}
+	os.Exit(m.Run())
+}
+
+// waitStatus reaps pid. spawn does not return the exec.Cmd, but the test
+// process is still the parent.
+func waitStatus(t *testing.T, pid int) syscall.WaitStatus {
+	t.Helper()
+	done := make(chan syscall.WaitStatus, 1)
+	go func() {
+		var ws syscall.WaitStatus
+		_, _ = syscall.Wait4(pid, &ws, 0, nil)
+		done <- ws
+	}()
+	select {
+	case ws := <-done:
+		return ws
+	// Race builds sleep about 1s at a zero exit.
+	case <-time.After(10 * time.Second):
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+		<-done
+		t.Fatalf("process %d did not exit within 10s", pid)
+		return 0
+	}
+}
+
+// assertNoChildren fails if the test process has any child, live or zombie.
+func assertNoChildren(t *testing.T) {
+	t.Helper()
+	var ws syscall.WaitStatus
+	_, err := syscall.Wait4(-1, &ws, syscall.WNOHANG, nil)
+	assert.ErrorIs(t, err, syscall.ECHILD)
+}
+
 // findProcess mirrors the production lookup used by Signal; it returns nil
 // for an unknown PID on Linux because os.FindProcess never errors there.
 // We probe liveness with Signal(0).
@@ -67,55 +117,65 @@ func TestSignalTerminatesLiveProcess(t *testing.T) {
 	assert.False(t, isAlive(pid))
 }
 
-// TestNewProcessContextCancelDoesNotKillProxy verifies that NewProcess
-// returns a PID whose lifetime is independent of the spawn context — the
-// proxy must outlive the caller's create-call context.
-func TestNewProcessContextCancelDoesNotKillProxy(t *testing.T) {
-	// Build a throwaway binary that blocks on a signal, simulating the
-	// real `proxy` subcommand. We can't use os.Executable() from a _test
-	// binary because the test harness would intercept it.
-	exe := buildSleeper(t)
+// Without the handshake, a signal sent right after spawn reaches a child
+// that does not listen yet: it dies by signal or ignores it.
+func TestSpawn_WaitsForReadiness(t *testing.T) {
+	tests := []struct {
+		name   string
+		sig    syscall.Signal
+		status int
+	}{
+		{"SIGUSR1 reports success", syscall.SIGUSR1, 0},
+		{"SIGUSR2 reports refusal", syscall.SIGUSR2, 1},
+		{"SIGTERM stops", syscall.SIGTERM, 0},
+		{"SIGINT stops", syscall.SIGINT, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pid, err := spawn(context.Background(), os.Args[0], "slow")
+			require.NoError(t, err)
 
+			require.NoError(t, Signal(pid, tt.sig))
+
+			ws := waitStatus(t, pid)
+			require.True(t, ws.Exited(), "proxy died by signal %v", ws.Signal())
+			assert.Equal(t, tt.status, ws.ExitStatus())
+		})
+	}
+}
+
+func TestSpawn_ChildExitsBeforeReady(t *testing.T) {
+	pid, err := spawn(context.Background(), os.Args[0], "exit-early")
+
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "exited before it was ready")
+	assert.Equal(t, -1, pid)
+	assertNoChildren(t)
+}
+
+func TestSpawn_ReadinessTimeout(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	pid, err := spawn(ctx, os.Args[0], "never-ready")
+
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Equal(t, -1, pid)
+	assertNoChildren(t)
+}
+
+// The readiness wait must disarm its kill once the proxy is ready.
+func TestNewProcess_OutlivesContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, exe)
-	cmd.Cancel = func() error { return nil } // mirror NewProcess
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	require.NoError(t, cmd.Start())
-	pid := cmd.Process.Pid
-	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL); _, _ = cmd.Process.Wait() })
+	pid, err := NewProcess(ctx, "test-container")
+	require.NoError(t, err)
 
-	cancel() // spawn context done — proxy must still be alive
-
-	// Give cmd.Cancel a moment to (not) fire.
+	cancel()
+	// Give a kill that was not disarmed time to land.
 	time.Sleep(100 * time.Millisecond)
-	assert.True(t, isAlive(pid), "proxy must outlive its spawn context")
 
 	require.NoError(t, Stop(pid))
-}
-
-// buildSleeper compiles a tiny Go program that blocks until SIGTERM.
-func buildSleeper(t *testing.T) string {
-	t.Helper()
-	src := `package main
-import (
-	"os"
-	"os/signal"
-	"syscall"
-)
-func main() {
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, syscall.SIGTERM, syscall.SIGINT, syscall.SIGUSR1)
-	<-c
-}
-`
-	dir := t.TempDir()
-	srcPath := dir + "/main.go"
-	require.NoError(t, os.WriteFile(srcPath, []byte(src), 0o644))
-	bin := dir + "/sleeper"
-	build := exec.Command("go", "build", "-o", bin, srcPath)
-	build.Stderr = os.Stderr
-	if err := build.Run(); err != nil {
-		t.Skipf("go build not available in test env: %v", err)
-	}
-	return bin
+	ws := waitStatus(t, pid)
+	require.True(t, ws.Exited(), "proxy died by signal %v", ws.Signal())
+	assert.Equal(t, 0, ws.ExitStatus())
 }
