@@ -1,4 +1,320 @@
 - commits:
+    - subject: "docs: update readme and add extension lifecycle documentation"
+      hash: b285e33581d1708777c9d217f5fdecbc0765cd9b
+      body: |
+        The extension mananger owns the lifecycle so this is the right place
+        to document it.
+      footer:
+        Change-type: patch
+        change-type: patch
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+    - subject: "validate: judge a kernel override armed on a device"
+      hash: 0ed1b55d8cec73abf7afaaae803c04168b1aece1
+      body: |
+        Adds validate, hup commit/reject command to decide on kernel override
+        arms both during and outside HUP.
+      footer:
+        Change-type: minor
+        change-type: minor
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+    - subject: "bootenv: read the block and record an override's verdicts"
+      hash: fc87e5783f545cdbc08b335ef7f0bc589a3f62e9
+      body: ""
+      footer:
+        Change-type: minor
+        change-type: minor
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+    - subject: "override: own the host files activation and validation share"
+      hash: bbf04f7b3047617d4087df5a329c1db8da54c19e
+      body: >
+        Move the activation's rejection record, health prestate and published
+        kernel
+
+        links into internal/override, ahead of a validator that reads what
+
+        activation writes and writes what activation reads to avoid packages
+        drifts.
+      footer:
+        Change-type: patch
+        change-type: patch
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+    - subject: "runtime: stop the proxy when a start fails"
+      hash: 93aa8397fbb5f112e57fe988e793cda5f8c67dea
+      body: |
+        The proxy is the container's only process and blocks until signalled.
+        A start that fails for a reason unrelated to the extension returned
+        without signalling it, leaving the process and its shim alive behind a
+        container nobody starts again.
+
+        Terminate the proxy on the way out and keep everything else as it was.
+      footer:
+        Change-type: patch
+        change-type: patch
+        Signed-off-by: Alex Gonzalez <alex@muxu.io>
+        signed-off-by: Alex Gonzalez <alex@muxu.io>
+      author: Alex Gonzalez
+      nested: []
+    - subject: "runtime: report an extension refusal as the container's exit status"
+      hash: f84f80aad27fb90cf79980ca91a83652d3366b2d
+      body: >
+        An activation the image can never pass came back as a failed start call,
+
+        indistinguishable from a machine that could not activate at all. The
+
+        caller retried a decision that was never going to change.
+
+
+        Route the verdict through the proxy instead: SIGUSR2 makes it exit 1,
+        and
+
+        the engine records the container as Exited (1) while the start call
+
+        succeeds. A machine condition still fails the call.
+      footer:
+        Change-type: minor
+        change-type: minor
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+    - subject: "runtime: activate a kernel override during start"
+      hash: 8d1f08e712bcef49b927a66ec78d033af1bddb3e
+      body: |
+        Activation moves into the runtime, before the container is stopped.
+
+        Create records the fabricated volume's host path beside the container
+        state, so start can publish out of it and RemoveState drops it with the
+        rest of the state.
+      footer:
+        Change-type: minor
+        change-type: minor
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+    - subject: "bootenv: read and write grub's environment block"
+      hash: f9272798155ff14229383e122a9ae52a56e8c79a
+      body: |
+        The kernel override state crosses a boot in grub's environment block.
+
+        Read and write the block directly. Arming becomes one block write, under
+        the exclusive flock os-helpers-bootenv takes, so it serialises against
+        the other writers that go through it.
+      footer:
+        Change-type: patch
+        change-type: patch
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+    - subject: "mounts: report whether a path is a mountpoint"
+      hash: 323c745a5a6328367f42b69fd6e597d187777f9b
+      body: |
+        Activation writes to /mnt/state and to the boot partition. A write that
+        lands before the filesystem is mounted goes under the mountpoint and is
+        lost at the next boot, with nothing to show for it.
+
+        IsMounted reads /proc/mounts, and errors when it cannot read it rather
+        than reporting false: a caller will not write what it cannot place.
+      footer:
+        Change-type: patch
+        change-type: patch
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+    - subject: "manager: parse the kernel ABI with mobynit's hostapp"
+      hash: 0c62532369067e5e078866f08db51f30bdd0eb45
+      body: |
+        mobynit reads the running kernel ABI from the command line with this
+        function. Sharing it keeps the manager's answer identical to the boot's.
+      footer:
+        Change-type: patch
+        change-type: patch
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+    - subject: "manager: collect fabricated volumes on the claim predicate"
+      hash: da778e59837e5645fcb0af761fce6f19d7fd21f8
+      body: |
+        Collect and sweep volumes at every pass when no surviving container
+        claims it.
+
+        The two container passes collapse into one walk over garbageReason, and
+        the stale-OS pass moves into pruneStaleOS, which now covers containers
+        and images only.
+      footer:
+        Change-type: patch
+        change-type: patch
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+    - subject: "manager: treat a removal that leaves the container dead as success"
+      hash: ba3ccfc2d28116e2bdbda01ef0f424cf9f27618e
+      body: |
+        When the engine DELETE and extesion it leaves the container Dead.
+
+        RemoveContainer now inspects only when the DELETE fails, and reports
+        success when it finds the container dead. Any other state, or an inspect
+        that itself fails, leaves the DELETE's own error standing.
+      footer:
+        Change-type: patch
+        change-type: patch
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+    - subject: "manager: replace net/http with a hand-rolled HTTP/1.0 client"
+      hash: 568b1811d7d0671534eee9cd4172e3675db2abed
+      body: |
+        Importing net/http retains crypto/x509's package init, and with it about
+        1.6 MB of crypto, x/net and x/text the binary never executes. Avoiding
+        http.Client and http.Transport was not enough as the cost is paid by the
+        import line, not the call graph.
+
+        This commit writes the request and parse the response
+        directly over the unix socket instead. Asking in HTTP/1.0 keeps chunked
+        framing out of the replies, so no decoder is needed.
+
+        Stripped amd64: 7,020,696 -> 5,353,624 bytes (-23.7%).
+      footer:
+        Change-type: patch
+        change-type: patch
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+    - subject: "runtime: fabricate the /boot volume of a kernel override"
+      hash: ce086504fdf6cdbd02323f39e77dbaad11a771ce
+      body: >
+        A kernel override ships a kernel that has to outlive the container that
+
+        installed it: the initramfs reads it on every subsequent boot, and the
+
+        previously committed one has to survive beside it until the new one is
+
+        ratified. The image declares no volume, so nothing was creating one.
+
+
+        Create now creates and fills that volume itself, before the proxy is
+
+        spawned.
+
+
+        The volume is deliberately never attached to the container. A runtime
+        could not
+
+        attach it in any case, as the engine resolves mounts before invoking
+        one.
+      footer:
+        Change-type: minor
+        change-type: minor
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+    - subject: "manager: ignore a DOCKER_HOST that names no unix socket"
+      hash: 7728b9edfce74033114fa7e8adfe957a320307e3
+      body: |
+        The inherited DOCKER_HOST variable can only be used with local sockets.
+
+        Accept only an absolute path, with or without the scheme, and fall back
+        to the default socket otherwise.
+      footer:
+        Change-type: patch
+        change-type: patch
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+    - subject: "build: make the binary target phony so a rebuild happens"
+      hash: c5e1453e4b19de97e61bc1dbee849c8a5bd7e187
+      body: >
+        Make considers an existing binary up to date and never re-rans go build.
+
+        The documented workflow, make build followed by go test ./e2e/, then
+        exercised
+
+        the previous binary against the current tests and reported a pass.
+      footer:
+        Change-type: patch
+        change-type: patch
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+    - subject: "manager: report an unreachable engine as a sentinel error"
+      hash: 98458fce41b181fd11973dca857e4b19bd109996
+      body: |
+        An engine that could not be reached came back as free-form text, so a
+        caller could not tell it apart from the engine answering that it had
+        nothing to do. The two call for opposite responses: one is retryable,
+        the other is done.
+
+        Wrap every socket and dial failure in ErrEngineUnavailable so a caller
+        can classify on identity rather than on a message.
+      footer:
+        Change-type: patch
+        change-type: patch
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+    - subject: "manager: serialize exported operations across processes"
+      hash: d78f055f286e04022e80d6a54d74ef89499f672c
+      body: |
+        Locks the manager's operations across processes so they cannot run
+        simultaneously.
+      footer:
+        Change-type: patch
+        change-type: patch
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+    - subject: "runtime: stop running extension hooks"
+      hash: 964372ae5880fcee28605acb755d34f167730628
+      body: |
+        The runtime no longer executes content from an extension image.
+      footer:
+        Change-type: major
+        change-type: major
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+    - subject: "manager: drop the deactivate hook from the stale OS prune"
+      hash: b39f2e0ea3a785276d4e00845e5a22705ab26d1f
+      body: >
+        The bookkeeping now moved into extension-rollback which owns those
+        variables
+
+        and runs at every boot.
+      footer:
+        Change-type: patch
+        change-type: patch
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+  version: 2.0.0
+  title: ""
+  date: 2026-09-28T13:05:06.743Z
+- commits:
     - subject: "manager: drive the zombie sweep flip from the inspect handler"
       hash: a9a8a5af5ebc9fa84f1fae726664cce8475066c0
       body: |
