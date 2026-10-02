@@ -154,6 +154,14 @@ contains different kernel bytes.
 | the ABI claim | a deployed extension image | the container store on disk |
 | the running ABI | the initramfs, through `/proc/cmdline` | memory only |
 
+The boot environment block is the `bootenv` file on the boot partition. A
+secure boot install splits the boot partition and keeps the block on the
+non-encrypted part. The runtime follows `/dev/disk/by-state/<label>` to the
+device and reads the block from its mount. It reads the
+non-encrypted partition when it exists, and the boot partition otherwise. An
+unmounted partition fails the command. The runtime does not fall back to the
+other partition.
+
 The boot environment block is plaintext and unauthenticated. `validate`,
 `hup commit` and `hup reject` first remove each ABI record whose value is not
 a 64-digit lowercase hex sha256. They also remove the trial count when they

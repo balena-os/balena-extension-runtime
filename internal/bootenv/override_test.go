@@ -35,7 +35,7 @@ func seedEntries(t *testing.T, entries ...string) string {
 	}
 
 	dir := t.TempDir()
-	path := filepath.Join(dir, "bootenv")
+	path := filepath.Join(dir, blockName)
 	require.NoError(t, os.WriteFile(path, block, 0o644))
 	t.Cleanup(SetBootMount(dir))
 	return path
@@ -74,8 +74,7 @@ func TestSlot_OtherIsTheComplement(t *testing.T) {
 }
 
 func TestRead_AbsentBlockIsNotADefect(t *testing.T) {
-	seedEntries(t)
-	require.NoError(t, os.Remove(Path()))
+	require.NoError(t, os.Remove(seedEntries(t)))
 
 	_, err := Read()
 	assert.ErrorIs(t, err, ErrNoBlock)
@@ -106,9 +105,9 @@ func TestRead_LeavesTheBlockByteIdentical(t *testing.T) {
 
 func TestRead_UnmountedBootPartition(t *testing.T) {
 	seedEntries(t)
-	prev := isMounted
-	isMounted = func(string) (bool, error) { return false, nil }
-	t.Cleanup(func() { isMounted = prev })
+	prev := mountpointOf
+	mountpointOf = func(string) (string, error) { return "", nil }
+	t.Cleanup(func() { mountpointOf = prev })
 
 	_, err := Read()
 	assert.ErrorIs(t, err, ErrNotMounted)
@@ -182,8 +181,7 @@ func TestForget(t *testing.T) {
 }
 
 func TestForget_AnEmptySetNeverOpensTheBlock(t *testing.T) {
-	seedEntries(t)
-	require.NoError(t, os.Remove(Path()))
+	require.NoError(t, os.Remove(seedEntries(t)))
 
 	armCleared, err := Forget([]string{"", ""})
 	require.NoError(t, err)

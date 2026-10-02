@@ -47,12 +47,46 @@ const (
 	KeyTrial = "kernel_override_trial"
 )
 
-// Linked in from the build: the partition label is per-layer when signed.
-// Must stay a var; -X cannot reach a const and fails silently.
-var bootMount = "/mnt/boot"
+const blockName = "bootenv"
 
-// isMounted is a test seam over the mount table read.
-var isMounted = mounts.IsMounted
+// The boot partitions, by label, linked in from the build. The block is on
+// the non-encrypted one when the device has it. Must stay vars. -X cannot
+// reach a const and fails silently.
+var (
+	nonencBootLabel = "balena-boot"
+	encBootLabel    = "resin-boot"
+)
+
+// byStateDir is a test seam. udev links every balena partition on the root
+// drive there by label.
+var byStateDir = "/dev/disk/by-state"
+
+// Test seams over the two host probes the resolver makes.
+var (
+	partition    = resolvePartition
+	mountpointOf = mounts.MountpointOf
+)
+
+// errNoPartition is a label no partition on the device carries.
+var errNoPartition = errors.New("no partition carries the label")
+
+// resolvePartition follows the by-state link to the device. A link that
+// exists and does not resolve is an error, not an absent partition: skipping
+// it would read the other partition's block.
+func resolvePartition(label string) (string, error) {
+	link := filepath.Join(byStateDir, label)
+	if _, err := os.Lstat(link); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("%w: %s", errNoPartition, link)
+		}
+		return "", fmt.Errorf("stat %s: %w", link, err)
+	}
+	dev, err := filepath.EvalSymlinks(link)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s: %w", link, err)
+	}
+	return dev, nil
+}
 
 // ErrNotMounted is a boot defect, so callers classify it as retryable.
 var ErrNotMounted = errors.New("the boot partition is not mounted")
@@ -61,17 +95,37 @@ var ErrNotMounted = errors.New("the boot partition is not mounted")
 // block. A u-boot device keeps its bootloader environment elsewhere.
 var ErrNoBlock = errors.New("no bootenv block on this device")
 
-// Path is the environment block's location on this build.
-func Path() string { return filepath.Join(bootMount, "bootenv") }
+// layout is the device as the resolver probes it: which labels name a
+// partition, and where each partition is mounted.
+type layout struct {
+	partitions map[string]string
+	mounts     map[string]string
+}
 
-// SetBootMount points the package at another mountpoint and returns a
-// restore. The build links the device's value in through -X, so this is how
-// a test in another package reaches a block it can write.
+// setLayout fakes both probes and returns a restore. Do not fake one probe
+// alone.
+func setLayout(l layout) func() {
+	prevPartition, prevMountpoint := partition, mountpointOf
+	partition = func(label string) (string, error) {
+		dev, ok := l.partitions[label]
+		if !ok {
+			return "", fmt.Errorf("%w: %s", errNoPartition, label)
+		}
+		return dev, nil
+	}
+	mountpointOf = func(dev string) (string, error) { return l.mounts[dev], nil }
+	return func() { partition, mountpointOf = prevPartition, prevMountpoint }
+}
+
+// SetBootMount points the package at a device with no non-encrypted boot
+// partition, whose boot partition is mounted at path, and returns a restore.
+// The build sets the device's labels through -X, so this is how a test in
+// another package reaches a block it can write.
 func SetBootMount(path string) func() {
-	prevMount, prevMounted := bootMount, isMounted
-	bootMount = path
-	isMounted = func(p string) (bool, error) { return p == path, nil }
-	return func() { bootMount, isMounted = prevMount, prevMounted }
+	return setLayout(layout{
+		partitions: map[string]string{encBootLabel: "boot"},
+		mounts:     map[string]string{"boot": path},
+	})
 }
 
 // Env is a block's entries, in block order, as grub keeps them.
@@ -175,18 +229,62 @@ func (e *Env) Marshal() ([]byte, error) {
 	return out, nil
 }
 
-// openBlock opens the block under the given flock mode. The mount check is
-// what separates an unmounted partition from a device that has no block.
-func openBlock(flag, how int) (*os.File, error) {
-	mounted, err := isMounted(bootMount)
-	if err != nil {
-		return nil, fmt.Errorf("checking whether %s is mounted: %w", bootMount, err)
+// blockMount returns the mount of the partition that holds the block. The
+// flasher creates the non-encrypted boot partition only when it splits the
+// boot partition under secure boot, and the block lives there. The initramfs
+// cryptsetup scripts and the non-EFI mount unit use the same by-state test.
+// Every other device keeps the block on the boot partition.
+//
+// An unmounted block partition is ErrNotMounted. The resolver never reads the
+// other partition.
+func blockMount() (string, error) {
+	for _, label := range []string{nonencBootLabel, encBootLabel} {
+		dev, err := partition(label)
+		if errors.Is(err, errNoPartition) {
+			continue
+		}
+		if err != nil {
+			return "", err
+		}
+		mount, err := mountpointOf(dev)
+		if err != nil {
+			return "", err
+		}
+		if mount == "" {
+			return "", fmt.Errorf("%w: %s (%s)", ErrNotMounted, label, dev)
+		}
+		return mount, nil
 	}
-	if !mounted {
-		return nil, fmt.Errorf("%w: %s", ErrNotMounted, bootMount)
+	// udev has not linked the drive yet, or the OS and this binary disagree.
+	return "", fmt.Errorf("%w: no partition under %s is labelled %s or %s",
+		ErrNotMounted, byStateDir, nonencBootLabel, encBootLabel)
+}
+
+// resolveBlockPath returns the block on this device. A mounted partition with
+// no block is a device with no override axis, which is not a defect.
+func resolveBlockPath() (string, error) {
+	mount, err := blockMount()
+	if err != nil {
+		return "", err
+	}
+	path := filepath.Join(mount, blockName)
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("%w: %s", ErrNoBlock, path)
+		}
+		return "", fmt.Errorf("stat %s: %w", path, err)
+	}
+	return path, nil
+}
+
+// openBlock opens the block under the given flock mode.
+func openBlock(flag, how int) (*os.File, error) {
+	path, err := resolveBlockPath()
+	if err != nil {
+		return nil, err
 	}
 
-	path := Path()
+	// The block can vanish after the stat.
 	f, err := os.OpenFile(path, flag, 0)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
