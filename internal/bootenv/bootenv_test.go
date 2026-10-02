@@ -185,11 +185,56 @@ func seedBlock(t *testing.T, fixture string) string {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "bootenv"), readFixture(t, fixture), 0o644))
 
-	prevMount, prevMounted := bootMount, isMounted
-	bootMount = dir
-	isMounted = func(path string) (bool, error) { return path == dir, nil }
-	t.Cleanup(func() { bootMount, isMounted = prevMount, prevMounted })
+	t.Cleanup(SetBootMount(dir))
 	return filepath.Join(dir, "bootenv")
+}
+
+// One signed image is installed both ways: the boot partition is split only
+// under secure boot. So the mount comes from the mount table, not from -X.
+func TestResolveBootMount_PicksTheMountTheDeviceActuallyHas(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		mounted []string
+		want    string
+	}{
+		{"split device prefers the non-encrypted mount", []string{"/mnt/efi", "/mnt/boot"}, "/mnt/efi"},
+		{"unsplit device falls back to the boot mount", []string{"/mnt/boot"}, "/mnt/boot"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			defer stubMounts(t, "/mnt/efi", "/mnt/boot", tc.mounted)()
+
+			got, err := resolveBootMount()
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// Neither mounted is a boot defect, not an absent block. Callers retry on
+// ErrNotMounted and give up on ErrNoBlock.
+func TestResolveBootMount_ReportsNotMountedWhenNeitherIsPresent(t *testing.T) {
+	defer stubMounts(t, "/mnt/efi", "/mnt/boot", nil)()
+
+	_, err := resolveBootMount()
+	assert.ErrorIs(t, err, ErrNotMounted)
+}
+
+// stubMounts links in the two candidates and declares which are mounted.
+func stubMounts(t *testing.T, nonenc, boot string, mounted []string) func() {
+	t.Helper()
+	prevNonenc, prevMount, prevMounted := nonencBootMount, bootMount, isMounted
+	nonencBootMount, bootMount = nonenc, boot
+	isMounted = func(path string) (bool, error) {
+		for _, m := range mounted {
+			if m == path {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+	return func() {
+		nonencBootMount, bootMount, isMounted = prevNonenc, prevMount, prevMounted
+	}
 }
 
 // The arm and the trial reset are one write. Two writes would leave a window
@@ -231,15 +276,14 @@ func TestArm_UnmountedBootPartitionIsNotMounted(t *testing.T) {
 }
 
 func TestArm_AbsentBlockErrors(t *testing.T) {
-	seedBlock(t, "created.bootenv")
-	require.NoError(t, os.Remove(Path()))
+	require.NoError(t, os.Remove(seedBlock(t, "created.bootenv")))
 
 	assert.Error(t, Arm(strings.Repeat("4", 64)))
 }
 
 // Two writers serialise on the file lock, so neither loses the other's key.
 func TestUpdate_ConcurrentWritersKeepBothKeys(t *testing.T) {
-	seedBlock(t, "created.bootenv")
+	path := seedBlock(t, "created.bootenv")
 
 	var wg sync.WaitGroup
 	for _, key := range []string{"first", "second"} {
@@ -251,7 +295,7 @@ func TestUpdate_ConcurrentWritersKeepBothKeys(t *testing.T) {
 	}
 	wg.Wait()
 
-	block, err := os.ReadFile(Path())
+	block, err := os.ReadFile(path)
 	require.NoError(t, err)
 	env, err := Parse(block)
 	require.NoError(t, err)

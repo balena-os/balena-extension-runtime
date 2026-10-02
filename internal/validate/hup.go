@@ -105,7 +105,7 @@ func HUPReject(ctx context.Context, logger *slog.Logger) error {
 func readBlockOrSkip(logger *slog.Logger, what string) (*bootenv.Env, error) {
 	env, err := bootenv.Read()
 	if errors.Is(err, bootenv.ErrNoBlock) {
-		logger.Info("no boot environment block; "+what, "path", bootenv.Path())
+		logger.Info("no boot environment block; "+what, "err", err)
 		return nil, nil
 	}
 	if err != nil {
