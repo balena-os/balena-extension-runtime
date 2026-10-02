@@ -74,8 +74,7 @@ func TestSlot_OtherIsTheComplement(t *testing.T) {
 }
 
 func TestRead_AbsentBlockIsNotADefect(t *testing.T) {
-	seedEntries(t)
-	require.NoError(t, os.Remove(Path()))
+	require.NoError(t, os.Remove(seedEntries(t)))
 
 	_, err := Read()
 	assert.ErrorIs(t, err, ErrNoBlock)
@@ -182,8 +181,7 @@ func TestForget(t *testing.T) {
 }
 
 func TestForget_AnEmptySetNeverOpensTheBlock(t *testing.T) {
-	seedEntries(t)
-	require.NoError(t, os.Remove(Path()))
+	require.NoError(t, os.Remove(seedEntries(t)))
 
 	armCleared, err := Forget([]string{"", ""})
 	require.NoError(t, err)
