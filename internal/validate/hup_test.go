@@ -20,6 +20,21 @@ func (w *world) undo() error {
 	return HUPReject(context.Background(), w.logger)
 }
 
+// A tampered arm is dropped before the audit line could carry it.
+func TestHUPReject_AMalformedArmWritesNoAuditLine(t *testing.T) {
+	w := newWorld(t,
+		bootenv.KeyUpgradeAvailable+"=1",
+		bootenv.KeyABI+"="+abiX+" by=forged",
+		bootenv.KeyCommitted(bootenv.SlotB)+"="+abiY)
+
+	require.NoError(t, w.undo())
+	assert.Empty(t, w.audit())
+	assert.Equal(t, map[string]string{
+		bootenv.KeyUpgradeAvailable:         "1",
+		bootenv.KeyCommitted(bootenv.SlotB): abiY,
+	}, w.block())
+}
+
 // An empty arm and one that did not boot are the same case: no override took
 // effect, so no committed key is written.
 func TestHUPCommit(t *testing.T) {

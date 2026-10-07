@@ -154,6 +154,11 @@ contains different kernel bytes.
 | the ABI claim | a deployed extension image | the container store on disk |
 | the running ABI | the initramfs, through `/proc/cmdline` | memory only |
 
+The boot environment block is plaintext and unauthenticated. `validate`,
+`hup commit` and `hup reject` first remove each ABI record whose value is not
+a 64-digit lowercase hex sha256. They also remove the trial count when they
+remove the arm. Activation refuses to arm such a value.
+
 ### Activation
 
 `start` calls `activate` before it stops the container.

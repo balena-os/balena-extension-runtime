@@ -17,6 +17,7 @@
 package bootenv
 
 import (
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -275,10 +276,28 @@ func Update(fn func(*Env) error) error {
 	return nil
 }
 
+// validABI reports whether abi is a kernel ABI id: the lowercase hex sha256
+// of a kernel image. Stage 2 boots stock for anything else, because the arm
+// becomes a path and a kernel command line argument there.
+func validABI(abi string) bool {
+	if len(abi) != sha256.Size*2 {
+		return false
+	}
+	for _, c := range abi {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 // Arm opens the validation window for abi.
 //
 // One write, so no state shows the arm beside a stale count.
 func Arm(abi string) error {
+	if !validABI(abi) {
+		return fmt.Errorf("kernel ABI %q is not a lowercase hex sha256", abi)
+	}
 	return Update(func(env *Env) error {
 		// Only a different kernel earns a fresh trial budget.
 		if current, _ := env.Get(KeyABI); current != abi {
