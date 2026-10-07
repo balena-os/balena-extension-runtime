@@ -221,6 +221,29 @@ func TestArm_SetsTheABIAndClearsTheTrialInOneWrite(t *testing.T) {
 	assert.Equal(t, "", committed)
 }
 
+// The arm reaches a path and the kernel command line in stage 2.
+func TestArm_RefusesAMalformedABIAndWritesNothing(t *testing.T) {
+	path := seedBlock(t, "armed.bootenv")
+	before, err := os.ReadFile(path)
+	require.NoError(t, err)
+
+	valid := strings.Repeat("a", 64)
+	for _, abi := range []string{
+		"",
+		valid[:63],
+		valid + "0",
+		strings.ToUpper(valid),
+		valid[:60] + " x=y",
+		"../" + valid[:61],
+	} {
+		assert.Error(t, Arm(abi), "%q", abi)
+	}
+
+	after, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, before, after)
+}
+
 func TestArm_UnmountedBootPartitionIsNotMounted(t *testing.T) {
 	seedBlock(t, "created.bootenv")
 	prev := isMounted

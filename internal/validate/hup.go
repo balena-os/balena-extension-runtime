@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 
 	"github.com/balena-os/balena-extension-runtime/internal/bootenv"
 	"github.com/balena-os/balena-extension-runtime/internal/override"
@@ -16,7 +17,7 @@ import (
 // The health prestate is left alone, as rollback-health leaves it; the next
 // arm replaces it.
 func HUPCommit(ctx context.Context, logger *slog.Logger) error {
-	env, err := readBlockOrSkip(logger, "nothing to commit")
+	env, err := loadBlockOrSkip(ctx, logger, "nothing to commit")
 	if err != nil || env == nil {
 		return err
 	}
@@ -60,7 +61,7 @@ func HUPCommit(ctx context.Context, logger *slog.Logger) error {
 // including a redundant rollback that relays nothing. An empty arm writes
 // neither.
 func HUPReject(ctx context.Context, logger *slog.Logger) error {
-	env, err := readBlockOrSkip(logger, "nothing to undo")
+	env, err := loadBlockOrSkip(ctx, logger, "nothing to undo")
 	if err != nil || env == nil {
 		return err
 	}
@@ -100,16 +101,36 @@ func HUPReject(ctx context.Context, logger *slog.Logger) error {
 	})
 }
 
-// readBlockOrSkip returns nil, nil on a device that has no block, which is
+// loadBlockOrSkip returns nil, nil on a device that has no block, which is
 // not a defect: it has no override axis.
-func readBlockOrSkip(logger *slog.Logger, what string) (*bootenv.Env, error) {
+//
+// The block is unauthenticated, so records that name no ABI are dropped
+// before anything acts on them. Their values are not logged.
+func loadBlockOrSkip(ctx context.Context, logger *slog.Logger, what string) (*bootenv.Env, error) {
 	env, err := bootenv.Read()
 	if errors.Is(err, bootenv.ErrNoBlock) {
 		logger.Info("no boot environment block; "+what, "path", bootenv.Path())
 		return nil, nil
 	}
-	if err != nil {
+	if err != nil || !env.HasMalformedABI() {
+		return env, err
+	}
+
+	if err := withOperationLock(ctx, func() error {
+		dropped, err := bootenv.Scrub()
+		if err != nil {
+			return err
+		}
+		if len(dropped) > 0 {
+			logger.Warn("dropped kernel override records that name no ABI", "keys", dropped)
+		}
+		if !slices.Contains(dropped, bootenv.KeyABI) {
+			return nil
+		}
+		// Sweeping the arm closes its window.
+		return override.RemoveHealthPrestate()
+	}); err != nil {
 		return nil, err
 	}
-	return env, nil
+	return bootenv.Read()
 }

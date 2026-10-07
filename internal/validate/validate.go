@@ -49,7 +49,7 @@ var (
 
 // Run is the ordinary-boot trial and the record sweep.
 func Run(ctx context.Context, logger *slog.Logger, o Options) error {
-	env, err := readBlockOrSkip(logger, "nothing to validate")
+	env, err := loadBlockOrSkip(ctx, logger, "nothing to validate")
 	if err != nil || env == nil {
 		return err
 	}
