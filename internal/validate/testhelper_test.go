@@ -22,9 +22,9 @@ const (
 )
 
 const (
-	abiX = "aaaa"
-	abiY = "bbbb"
-	abiZ = "cccc"
+	abiX = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	abiY = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	abiZ = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 )
 
 // world redirects every host fact the validator reads at a temporary tree and

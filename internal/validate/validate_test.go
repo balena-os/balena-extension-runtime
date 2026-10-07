@@ -37,6 +37,30 @@ func TestRun_BlockStates(t *testing.T) {
 	})
 }
 
+// Tampered records are dropped before anything acts on them: no rejection is
+// recorded, no published kernel is removed, and the proven arm comes back.
+func TestRun_MalformedRecordsAreDroppedFirst(t *testing.T) {
+	w := newWorld(t,
+		bootenv.KeyABI+"="+abiY+" init=/bin/sh",
+		bootenv.KeyTrial+"=3",
+		bootenv.KeyRejected+"=../"+abiX,
+		bootenv.KeyCommitted(bootenv.SlotA)+"="+abiX)
+	w.publish(abiX)
+	w.claims = []string{abiX}
+	w.writePrestate()
+
+	require.NoError(t, w.run())
+	assert.Equal(t, map[string]string{
+		bootenv.KeyCommitted(bootenv.SlotA): abiX,
+		bootenv.KeyABI:                      abiX,
+	}, w.block())
+	assert.Equal(t, []string{abiX}, w.published())
+	assert.Empty(t, w.rejected())
+	assert.Empty(t, w.audit())
+	assert.False(t, w.prestateExists(), "dropping the arm closes its window")
+	assert.Zero(t, w.rebooted)
+}
+
 // The relay is only ever written inside an update window, so it is consumed
 // above the gate. Nothing below it runs.
 func TestRun_TheRelayIsConsumedAboveTheUpdateGate(t *testing.T) {

@@ -1,5 +1,7 @@
 package bootenv
 
+import "slices"
+
 // The override keys beyond the two this package writes on an arm. The relay
 // is written inside a host OS update window and consumed on the next boot;
 // upgrade_available is read only, since the update path owns it.
@@ -168,6 +170,53 @@ func HUPReject(slot Slot, running string) (relayed bool, err error) {
 		return false, err
 	}
 	return relayed, nil
+}
+
+// abiKeys are the records whose value names a kernel ABI.
+var abiKeys = []string{KeyABI, KeyRejected, KeyCommitted(SlotA), KeyCommitted(SlotB)}
+
+// HasMalformedABI reports whether a record names something other than an
+// ABI id. An empty value is a state, not a name.
+func (e *Env) HasMalformedABI() bool {
+	for _, key := range abiKeys {
+		if e.malformedABI(key) {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *Env) malformedABI(key string) bool {
+	v, _ := e.Get(key)
+	return v != "" && !validABI(v)
+}
+
+// Scrub drops every record HasMalformedABI objects to, in one write, and the
+// trial count with a dropped arm. It reports the keys it dropped.
+//
+// No ordinary write leaves one: Arm refuses them and stage 2 boots stock for
+// them. A tampered block or a torn write leaves one. Kept, they would reach
+// the relay and the audit line.
+func Scrub() (dropped []string, err error) {
+	err = updateBlock(func(env *Env) error {
+		for _, key := range abiKeys {
+			if env.malformedABI(key) {
+				env.Unset(key)
+				dropped = append(dropped, key)
+			}
+		}
+		if len(dropped) == 0 {
+			return errNoChange
+		}
+		if slices.Contains(dropped, KeyABI) {
+			env.Unset(KeyTrial)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return dropped, nil
 }
 
 func abiSet(abis []string) map[string]struct{} {
