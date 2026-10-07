@@ -11,7 +11,7 @@ repository, not from those files.
 
 ## The container lifecycle
 
-The runtime implements the five OCI commands:
+The runtime implements five container lifecycle commands:
 
 1. `create` does these steps in sequence:
    1. It reads the bundle spec and the image labels.
