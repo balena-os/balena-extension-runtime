@@ -11,9 +11,9 @@ import (
 )
 
 const (
-	abiX = "aaaa"
-	abiY = "bbbb"
-	abiZ = "cccc"
+	abiX = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	abiY = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	abiZ = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 )
 
 // seedEntries lays down a block holding exactly these lines and points the
@@ -188,6 +188,50 @@ func TestForget_AnEmptySetNeverOpensTheBlock(t *testing.T) {
 	armCleared, err := Forget([]string{"", ""})
 	require.NoError(t, err)
 	assert.False(t, armCleared)
+}
+
+// A tampered record goes, with the count when it was the arm. Valid and
+// empty values stay: an empty committed value means good on stock.
+func TestScrub(t *testing.T) {
+	t.Run("drops malformed records in one write", func(t *testing.T) {
+		seedEntries(t,
+			KeyABI+"="+abiX[:60]+" x=y", KeyTrial+"=2",
+			KeyCommitted(SlotA)+"=", KeyCommitted(SlotB)+"="+abiY,
+			KeyRejected+"=../"+abiZ[:61], "resin_root_part=A")
+		calls := countUpdates(t)
+
+		dropped, err := Scrub()
+		require.NoError(t, err)
+		assert.Equal(t, []string{KeyABI, KeyRejected}, dropped)
+		assert.Equal(t, map[string]string{
+			KeyCommitted(SlotA): "",
+			KeyCommitted(SlotB): abiY,
+			"resin_root_part":   "A",
+		}, readBack(t))
+		assert.Equal(t, 1, *calls)
+	})
+
+	t.Run("a valid arm keeps its count", func(t *testing.T) {
+		seedEntries(t, KeyABI+"="+abiX, KeyTrial+"=2", KeyCommitted(SlotA)+"=AAAA")
+
+		dropped, err := Scrub()
+		require.NoError(t, err)
+		assert.Equal(t, []string{KeyCommitted(SlotA)}, dropped)
+		assert.Equal(t, map[string]string{KeyABI: abiX, KeyTrial: "2"}, readBack(t))
+	})
+
+	t.Run("a clean block is not rewritten", func(t *testing.T) {
+		path := seedEntries(t, KeyABI+"="+abiX, KeyCommitted(SlotA)+"="+abiX)
+		before, err := os.ReadFile(path)
+		require.NoError(t, err)
+
+		dropped, err := Scrub()
+		require.NoError(t, err)
+		assert.Empty(t, dropped)
+		after, err := os.ReadFile(path)
+		require.NoError(t, err)
+		assert.Equal(t, before, after)
+	})
 }
 
 // The relay is a window close, so the count goes whatever the arm names.

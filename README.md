@@ -2,9 +2,9 @@ Balena extension runtime
 ========================
 
 An OCI runtime for balenaOS hostapp extensions. It implements the OCI runtime
-commands `create`, `start`, `kill`, `delete` and `state`. It runs no
-long-lived process: an extension is an overlay that the host applies at boot,
-and its container exits.
+commands `create`, `start`, `kill`, `delete`, `state` and `features`. It runs
+no long-lived process: an extension is an overlay that the host applies at
+boot, and its container exits.
 
 The containerd shim runs the runtime. Users do not run it. The same binary is
 also `balena-extension-manager`, a hard link that selects its commands from

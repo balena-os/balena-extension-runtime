@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 
 	"github.com/balena-os/balena-extension-runtime/internal/bootenv"
 	"github.com/balena-os/balena-extension-runtime/internal/override"
@@ -16,7 +17,7 @@ import (
 // The health prestate is left alone, as rollback-health leaves it; the next
 // arm replaces it.
 func HUPCommit(ctx context.Context, logger *slog.Logger) error {
-	env, err := readBlockOrSkip(logger, "nothing to commit")
+	env, err := loadBlockOrSkip(ctx, logger, "nothing to commit")
 	if err != nil || env == nil {
 		return err
 	}
@@ -57,19 +58,19 @@ func HUPCommit(ctx context.Context, logger *slog.Logger) error {
 // was proven about the kernel bytes on the OS they were built for.
 //
 // The audit line goes first, fsynced, and is written for any nonempty arm,
-// including a redundant rollback that relays nothing. An empty arm writes
-// neither.
+// including a redundant rollback that relays nothing. An empty arm writes no
+// audit line and relays nothing. It still gets the target slot's proven
+// override, through the same restore Run uses, because the next boot loads
+// whatever the arm names. An empty arm beside no proven override writes
+// nothing. A device that never armed one does not rewrite its boot block in
+// a rollback.
 func HUPReject(ctx context.Context, logger *slog.Logger) error {
-	env, err := readBlockOrSkip(logger, "nothing to undo")
+	env, err := loadBlockOrSkip(ctx, logger, "nothing to undo")
 	if err != nil || env == nil {
 		return err
 	}
 
 	armed, _ := env.Get(bootenv.KeyABI)
-	if armed == "" {
-		logger.Info("no kernel override armed; nothing to undo")
-		return nil
-	}
 	running, err := runningABI()
 	if err != nil {
 		return err
@@ -81,6 +82,14 @@ func HUPReject(ctx context.Context, logger *slog.Logger) error {
 	target := slot.Other()
 
 	to, _ := env.Get(bootenv.KeyCommitted(target))
+	switch {
+	case armed == "" && to == "":
+		logger.Info("no kernel override armed; nothing to undo")
+		return nil
+	case armed == "":
+		logger.Warn("no override armed beside a proven one; restoring it", "slot", target, "abi", to)
+		return restore(ctx, logger, target)
+	}
 	logger.Info("undoing the kernel override", "abi", armed, "slot", target, "to", to)
 
 	return withOperationLock(ctx, func() error {
@@ -100,9 +109,15 @@ func HUPReject(ctx context.Context, logger *slog.Logger) error {
 	})
 }
 
-// readBlockOrSkip returns nil, nil on a device that has no block, which is
+// loadBlockOrSkip returns nil, nil on a device that has no block, which is
 // not a defect: it has no override axis.
-func readBlockOrSkip(logger *slog.Logger, what string) (*bootenv.Env, error) {
+//
+// The block is unauthenticated, so records that name no ABI are dropped
+// before anything acts on them. Their values are not logged.
+//
+// The drop runs above the update gate, like the relay. The update path
+// cannot use such a record.
+func loadBlockOrSkip(ctx context.Context, logger *slog.Logger, what string) (*bootenv.Env, error) {
 	env, err := bootenv.Read()
 	if errors.Is(err, bootenv.ErrNoBlock) {
 		logger.Info("no boot environment block; "+what, "path", bootenv.Path())
@@ -111,5 +126,25 @@ func readBlockOrSkip(logger *slog.Logger, what string) (*bootenv.Env, error) {
 	if err != nil {
 		return nil, err
 	}
-	return env, nil
+	if !env.HasMalformedABI() {
+		return env, nil
+	}
+
+	if err := withOperationLock(ctx, func() error {
+		dropped, err := bootenv.Scrub()
+		if err != nil {
+			return err
+		}
+		if len(dropped) > 0 {
+			logger.Warn("dropped kernel override records that name no ABI", "keys", dropped)
+		}
+		if !slices.Contains(dropped, bootenv.KeyABI) {
+			return nil
+		}
+		// Sweeping the arm closes its window.
+		return override.RemoveHealthPrestate()
+	}); err != nil {
+		return nil, err
+	}
+	return bootenv.Read()
 }

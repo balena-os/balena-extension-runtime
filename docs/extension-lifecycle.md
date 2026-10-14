@@ -11,7 +11,7 @@ repository, not from those files.
 
 ## The container lifecycle
 
-The runtime implements the five OCI commands:
+The runtime implements five container lifecycle commands:
 
 1. `create` does these steps in sequence:
    1. It reads the bundle spec and the image labels.
@@ -154,6 +154,12 @@ contains different kernel bytes.
 | the ABI claim | a deployed extension image | the container store on disk |
 | the running ABI | the initramfs, through `/proc/cmdline` | memory only |
 
+The boot environment block is plaintext and unauthenticated. `validate`,
+`hup commit` and `hup reject` first remove each ABI record whose value is not
+a 64-digit lowercase hex sha256. They also remove the trial count when they
+remove the arm. They remove the health prestate too, because dropping the arm
+closes its window. Activation refuses to arm such a value.
+
 ### Activation
 
 `start` calls `activate` before it stops the container.
@@ -277,6 +283,13 @@ next arm.
 
 When the arm is already the committed value of the target slot, `hup reject`
 relays nothing. Otherwise the next boot would forget a proven ABI.
+
+When the arm is empty, `hup reject` writes no audit line and relays nothing.
+It still sets the arm to the committed override of the target slot. The
+initramfs loads the armed kernel on the rollback boot. An empty arm would boot
+that slot on the stock kernel. When the target slot has no committed override
+either, `hup reject` writes nothing. A device that never armed an override
+does not rewrite its boot block during a rollback.
 
 Neither command takes a slot argument. Each derives the slot from
 `/mnt/sysroot/active`. A write to the committed value of the wrong slot

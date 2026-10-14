@@ -123,6 +123,7 @@ func activate(ctx context.Context, logger *slog.Logger, containerID, rootfs stri
 		if err := override.WriteHealthPrestate(); err != nil {
 			return err
 		}
+		// The hash match above proves abi well formed.
 		if err := armOverride(abi); err != nil {
 			return fmt.Errorf("arm kernel override %s: %w", abi, err)
 		}
