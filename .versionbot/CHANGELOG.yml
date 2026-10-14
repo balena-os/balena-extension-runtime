@@ -1,4 +1,53 @@
 - commits:
+    - subject: "validate: restore the rollback slot's arm when hup reject finds none"
+      hash: d622a85c20dda75395449c0ee0307fcd6e906669
+      body: |
+        hup reject returned early on an empty arm. The rollback slot then
+        booted the stock kernel without its proven override, until validate
+        restored the arm on a later boot.
+
+        This commit routes the empty arm through the restore Run uses and
+        keeps the early return when the target slot has no committed override
+        either, so a device with no override records does not rewrite its
+        boot block during a rollback.
+      footer:
+        Change-type: patch
+        change-type: patch
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+    - subject: "features: report the OCI feature set to the engine probe"
+      hash: b2d91f0dcbd31fb87689b779bd3550fc11750e03
+      body: |
+        The engine probes every registered runtime with `<runtime> features` at
+        start. The subcommand was missing, so cobra exited 1 and the engine
+        logged a warning on each boot.
+
+        The descriptor reports false for every subsystem, since the runtime
+        reads only the root path and the annotations of a bundle spec.
+      footer:
+        Change-type: patch
+        change-type: patch
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+    - subject: "validate: drop boot environment records that name no ABI"
+      hash: 06aee272e24abe72a76cdbb9d302a9e209d18f91
+      body: |
+        Refuse any invalid kernel override values.
+      footer:
+        Change-type: patch
+        change-type: patch
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+  version: 2.0.1
+  title: ""
+  date: 2026-10-14T14:03:41.027Z
+- commits:
     - subject: "docs: update readme and add extension lifecycle documentation"
       hash: b285e33581d1708777c9d217f5fdecbc0765cd9b
       body: |
