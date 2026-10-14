@@ -20,7 +20,8 @@ func (w *world) undo() error {
 	return HUPReject(context.Background(), w.logger)
 }
 
-// A tampered arm is dropped before the audit line could carry it.
+// The scrub drops a tampered arm before the audit line can carry it. The
+// rollback slot still gets its proven arm.
 func TestHUPReject_AMalformedArmWritesNoAuditLine(t *testing.T) {
 	w := newWorld(t,
 		bootenv.KeyUpgradeAvailable+"=1",
@@ -31,6 +32,7 @@ func TestHUPReject_AMalformedArmWritesNoAuditLine(t *testing.T) {
 	assert.Empty(t, w.audit())
 	assert.Equal(t, map[string]string{
 		bootenv.KeyUpgradeAvailable:         "1",
+		bootenv.KeyABI:                      abiY,
 		bootenv.KeyCommitted(bootenv.SlotB): abiY,
 	}, w.block())
 }
@@ -166,13 +168,27 @@ func TestHUPReject(t *testing.T) {
 	}
 }
 
-func TestHUPReject_AnEmptyArmWritesNeither(t *testing.T) {
+// The kexec loads whatever the arm names on the rollback boot. An empty arm
+// would boot the rollback slot without its proven kernel.
+func TestHUPReject_AnEmptyArmRestoresTheTargetSlotsOverride(t *testing.T) {
 	w := newWorld(t, bootenv.KeyCommitted(bootenv.SlotB)+"="+abiY)
 
 	require.NoError(t, w.undo())
-	assert.Equal(t, map[string]string{bootenv.KeyCommitted(bootenv.SlotB): abiY}, w.block())
+	assert.Equal(t, map[string]string{
+		bootenv.KeyABI:                      abiY,
+		bootenv.KeyCommitted(bootenv.SlotB): abiY,
+	}, w.block())
 	assert.Empty(t, w.audit())
-	assert.Zero(t, w.locks)
+	assert.Equal(t, 1, w.locks)
+}
+
+func TestHUPReject_AnEmptyArmWithNoProvenOverrideWritesNothing(t *testing.T) {
+	w := newWorld(t, bootenv.KeyCommitted(bootenv.SlotA)+"="+abiY)
+
+	require.NoError(t, w.undo())
+	assert.Equal(t, map[string]string{bootenv.KeyCommitted(bootenv.SlotA): abiY}, w.block())
+	assert.Empty(t, w.audit())
+	assert.Zero(t, w.locks, "nothing to write, so the block stays untouched")
 }
 
 func TestHUPReject_NoBlockExitsZero(t *testing.T) {

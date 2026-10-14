@@ -58,8 +58,12 @@ func HUPCommit(ctx context.Context, logger *slog.Logger) error {
 // was proven about the kernel bytes on the OS they were built for.
 //
 // The audit line goes first, fsynced, and is written for any nonempty arm,
-// including a redundant rollback that relays nothing. An empty arm writes
-// neither.
+// including a redundant rollback that relays nothing. An empty arm writes no
+// audit line and relays nothing. It still gets the target slot's proven
+// override, through the same restore Run uses, because the next boot loads
+// whatever the arm names. An empty arm beside no proven override writes
+// nothing. A device that never armed one does not rewrite its boot block in
+// a rollback.
 func HUPReject(ctx context.Context, logger *slog.Logger) error {
 	env, err := loadBlockOrSkip(ctx, logger, "nothing to undo")
 	if err != nil || env == nil {
@@ -67,10 +71,6 @@ func HUPReject(ctx context.Context, logger *slog.Logger) error {
 	}
 
 	armed, _ := env.Get(bootenv.KeyABI)
-	if armed == "" {
-		logger.Info("no kernel override armed; nothing to undo")
-		return nil
-	}
 	running, err := runningABI()
 	if err != nil {
 		return err
@@ -82,6 +82,14 @@ func HUPReject(ctx context.Context, logger *slog.Logger) error {
 	target := slot.Other()
 
 	to, _ := env.Get(bootenv.KeyCommitted(target))
+	switch {
+	case armed == "" && to == "":
+		logger.Info("no kernel override armed; nothing to undo")
+		return nil
+	case armed == "":
+		logger.Warn("no override armed beside a proven one; restoring it", "slot", target, "abi", to)
+		return restore(ctx, logger, target)
+	}
 	logger.Info("undoing the kernel override", "abi", armed, "slot", target, "to", to)
 
 	return withOperationLock(ctx, func() error {

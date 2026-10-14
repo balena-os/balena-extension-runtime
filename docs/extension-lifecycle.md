@@ -284,6 +284,13 @@ next arm.
 When the arm is already the committed value of the target slot, `hup reject`
 relays nothing. Otherwise the next boot would forget a proven ABI.
 
+When the arm is empty, `hup reject` writes no audit line and relays nothing.
+It still sets the arm to the committed override of the target slot. The
+initramfs loads the armed kernel on the rollback boot. An empty arm would boot
+that slot on the stock kernel. When the target slot has no committed override
+either, `hup reject` writes nothing. A device that never armed an override
+does not rewrite its boot block during a rollback.
+
 Neither command takes a slot argument. Each derives the slot from
 `/mnt/sysroot/active`. A write to the committed value of the wrong slot
 removes a proven kernel.

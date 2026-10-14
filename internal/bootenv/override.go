@@ -154,6 +154,8 @@ func Reject(abi string, slot Slot) (wrote bool, err error) {
 // override, relays nothing: the next boot would otherwise forget a proven ABI.
 //
 // The trial count is left for the relay's consumer.
+//
+// An empty arm relays nothing and still gets slot's committed override.
 func HUPReject(slot Slot, running string) (relayed bool, err error) {
 	err = updateBlock(func(env *Env) error {
 		arm, _ := env.Get(KeyABI)
