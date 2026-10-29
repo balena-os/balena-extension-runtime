@@ -367,6 +367,20 @@ volumes against it.
 not satisfy. Use it only after a host OS update commits. Before the commit, a
 stale image is the rollback target.
 
+The pass fails and removes nothing when the stock kernel runs while the boot
+environment block arms an override. The running kernel then does not show the
+kernel the device will boot next. The kill switch (`emergency` or
+`mobynit.no_overlays`) boots the stock kernel and keeps the arm. A failed
+kexec also keeps the arm until its trials are spent. Stage 2 also boots stock
+when no extension claims the arm, when its kernel is not in `boot-by-abi`, or
+when its trial is spent and the slot has no committed override. `validate`
+clears each of these arms at boot. `hup commit` removes a malformed arm before
+the commit hooks run, so the pass never sees one.
+
+A failed pass is only a warning in `rollback-health`. Stale images stay on the
+data partition until the next host OS update commits. A device with no block
+has no override, so the pass judges the stock kernel.
+
 This pass does not remove volumes, on purpose. A withdrawn override on a
 device that never changes its OS leaves a volume that never becomes stale. A
 volume sweep that waited for staleness would keep that kernel forever.

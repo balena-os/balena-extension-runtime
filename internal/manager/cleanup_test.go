@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/balena-os/balena-extension-runtime/internal/bootenv"
 	"github.com/balena-os/balena-extension-runtime/internal/labels"
 	"github.com/balena-os/hostapp"
 	"github.com/stretchr/testify/assert"
@@ -351,7 +352,7 @@ func TestCleanup_StaleOS_CollectsVolumeOnceContainerIsGone(t *testing.T) {
 
 // TestCleanup_StaleOS_JudgesTheRunningSystem pins which host files decide the
 // stale-OS pass. Every row shares one fixture and differs only in the kernel
-// cmdline, so the ABI the cmdline publishes is the only variable.
+// cmdline and the boot environment block.
 func TestCleanup_StaleOS_JudgesTheRunningSystem(t *testing.T) {
 	const (
 		id      = "abiclaimant00000"
@@ -367,13 +368,22 @@ func TestCleanup_StaleOS_JudgesTheRunningSystem(t *testing.T) {
 		cmdline string
 		// unreadable points procCmdline at a missing file.
 		unreadable bool
-		wantErr    bool
-		wantKept   bool
+		// block is the boot environment. nil is no block.
+		block []string
+		// badBlock writes a block that does not parse.
+		badBlock bool
+		wantErr  bool
+		wantKept bool
 	}{
 		{name: "every claim matches", cmdline: abiToken(abi), wantKept: true},
 		{name: "ABI differs", cmdline: abiToken("other")},
 		{name: "stock boot", cmdline: "console=tty1"},
 		{name: "cmdline unreadable", cmdline: "console=tty1", unreadable: true, wantErr: true, wantKept: true},
+		{name: "stock boot with no arm", cmdline: "console=tty1", block: []string{"upgrade_available=0"}},
+		// Kill switch or failed kexec: the arm may boot next.
+		{name: "stock boot with an armed override", cmdline: "console=tty1", block: []string{bootenv.KeyABI + "=" + abi}, wantErr: true, wantKept: true},
+		{name: "stock boot with an unreadable block", cmdline: "console=tty1", badBlock: true, wantErr: true, wantKept: true},
+		{name: "override boot ignores the block", cmdline: abiToken("other"), badBlock: true},
 	}
 
 	for _, tc := range cases {
@@ -399,6 +409,12 @@ func TestCleanup_StaleOS_JudgesTheRunningSystem(t *testing.T) {
 			runningSystem(t, tc.cmdline)
 			if tc.unreadable {
 				procCmdline = filepath.Join(t.TempDir(), "absent")
+			}
+			if tc.block != nil {
+				armBlock(t, tc.block...)
+			}
+			if tc.badBlock {
+				require.NoError(t, os.WriteFile(filepath.Join(bootDir, "bootenv"), []byte("short"), 0o644))
 			}
 
 			err := Cleanup(context.Background(), quietLogger(), CleanupOpts{PruneStaleOS: true})

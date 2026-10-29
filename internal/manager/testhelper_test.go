@@ -13,6 +13,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/balena-os/balena-extension-runtime/internal/bootenv"
+	"github.com/stretchr/testify/require"
 )
 
 // TestMain redirects the cross-process operation lock to a writable path for
@@ -57,6 +60,23 @@ func runningSystem(t *testing.T, cmdline string) {
 	t.Cleanup(func() {
 		procKernelRelease, procCmdline, osReleasePath = prevKernel, prevCmdline, prevOSRelease
 	})
+	// No block: a device with no override axis.
+	bootDir = t.TempDir()
+	t.Cleanup(bootenv.SetBootMount(bootDir))
+}
+
+// bootDir is the boot mount runningSystem set up last.
+var bootDir string
+
+// armBlock writes a grub environment block into the boot mount.
+func armBlock(t *testing.T, entries ...string) {
+	t.Helper()
+	block := []byte("# GRUB Environment Block\n")
+	for _, e := range entries {
+		block = append(block, e+"\n"...)
+	}
+	block = append(block, bytes.Repeat([]byte("#"), 1024-len(block))...)
+	require.NoError(t, os.WriteFile(filepath.Join(bootDir, "bootenv"), block, 0o644))
 }
 
 // loggerCapturing writes to buf so a test can assert on what a path reports

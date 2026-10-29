@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/balena-os/balena-extension-runtime/internal/bootenv"
 	"github.com/balena-os/balena-extension-runtime/internal/labels"
 	"github.com/balena-os/hostapp"
 )
@@ -124,18 +125,29 @@ func cleanup(ctx context.Context, logger *slog.Logger, opts CleanupOpts) error {
 // A predicate it cannot compute fails rather than degrading to a no-op:
 // skipping a sweep the caller asked for would let disks fill after a HUP
 // commit with nobody noticing.
+//
+// A stock boot with an armed override also fails. The device may boot that
+// override next.
 func pruneStaleOS(ctx context.Context, logger *slog.Logger, eng *Engine, containers []Container, dropped map[string]bool) []error {
+	data, err := os.ReadFile(procCmdline)
+	if err != nil {
+		return []error{fmt.Errorf("read kernel cmdline: %w", err)}
+	}
+	// A stock boot has no token, so ABI claims are stale.
+	abiID := hostapp.ParseHostKernelABIID(string(data))
+	if abiID == "" {
+		armed, err := armedABI()
+		if err != nil {
+			return []error{err}
+		}
+		// The arm is unauthenticated, so its value is not logged.
+		if armed != "" {
+			return []error{errors.New("stock kernel runs with an override armed: the next boot may run the override")}
+		}
+	}
 	kver, err := runningKernelVersion()
 	if err != nil {
 		return []error{fmt.Errorf("read running kernel version: %w", err)}
-	}
-	// A failure here is distinct from the legitimate "" result that
-	// runningKernelABIID returns when the balena_kernel_abi cmdline token is
-	// absent: it means we cannot tell whether abi-labelled images match the
-	// running kernel.
-	abiID, err := runningKernelABIID()
-	if err != nil {
-		return []error{fmt.Errorf("compute kernel ABI ID: %w", err)}
 	}
 	osVersion, err := readOSVersion()
 	if err != nil {
@@ -338,16 +350,16 @@ func runningKernelVersion() (string, error) {
 	return release, nil
 }
 
-// runningKernelABIID returns the kernel identity the initrd published for
-// the booted kernel: the balena_kernel_abi cmdline token, which carries the
-// sha256 of the kernel image that was kexec'd. Returns "" with nil error
-// when the token is absent (stock kernel boot): extensions that claim
-// kernel-abi-id against such a device fail their claim naturally through the
-// `stale` predicate.
-func runningKernelABIID() (string, error) {
-	data, err := os.ReadFile(procCmdline)
-	if err != nil {
-		return "", fmt.Errorf("read kernel cmdline: %w", err)
+// armedABI is the override stage 2 may boot next. A device with no block
+// has no override axis.
+func armedABI() (string, error) {
+	env, err := bootenv.Read()
+	if errors.Is(err, bootenv.ErrNoBlock) {
+		return "", nil
 	}
-	return hostapp.ParseHostKernelABIID(string(data)), nil
+	if err != nil {
+		return "", fmt.Errorf("read boot environment: %w", err)
+	}
+	abi, _ := env.Get(bootenv.KeyABI)
+	return abi, nil
 }

@@ -18,7 +18,7 @@ RUN CGO_ENABLED=0 go test -c -o e2e.test ./e2e/
 # Stage 2: test image with Docker-in-Docker
 FROM docker:25-dind AS testimage
 
-RUN apk add --no-cache bash
+RUN apk add --no-cache bash e2fsprogs util-linux
 
 COPY --from=gobuild /src/balena-extension-runtime /src/balena-extension-runtime
 COPY --from=gobuild /src/balena-extension-manager /src/balena-extension-manager
@@ -69,9 +69,22 @@ done
 # them.
 mkdir -p /mnt/state /mnt/data /mnt/boot
 mount --bind /mnt/state /mnt/state
-mount --bind /mnt/boot /mnt/boot
 mkdir -p /mnt/data/docker
 mount --bind /var/lib/docker /mnt/data/docker
+
+# The runtime resolves the block's partition through /dev/disk/by-state, so
+# the boot mount must be a real block device. udev is not in this image, so
+# the link is made by hand.
+truncate -s 16M /boot.img
+# The kernel hands out a loop index, but this container has its own /dev, so
+# the node may be missing.
+bootdev="$(losetup -f)"
+[ -b "$bootdev" ] || mknod "$bootdev" b 7 "${bootdev##*loop}"
+losetup "$bootdev" /boot.img
+mkfs.ext4 -q -L balena-boot "$bootdev"
+mount "$bootdev" /mnt/boot
+mkdir -p /dev/disk/by-state
+ln -sf "$bootdev" /dev/disk/by-state/balena-boot
 
 # What "grub-editenv create" plus a set leaves behind, seeded by hand: grub is
 # not in this image and the runtime's own reader is what the test exercises.
