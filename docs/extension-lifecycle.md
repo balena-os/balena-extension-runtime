@@ -359,6 +359,11 @@ volumes against it.
 not satisfy. Use it only after a host OS update commits. Before the commit, a
 stale image is the rollback target.
 
+The pass fails and removes nothing when `emergency` or `mobynit.no_overlays`
+is on the kernel command line. With these tokens, kexec boots the stock kernel
+whatever kernel is committed. The running kernel then tells nothing about the
+kernel the device will boot next.
+
 This pass does not remove volumes, on purpose. A withdrawn override on a
 device that never changes its OS leaves a volume that never becomes stale. A
 volume sweep that waited for staleness would keep that kernel forever.

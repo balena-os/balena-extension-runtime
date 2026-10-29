@@ -124,19 +124,24 @@ func cleanup(ctx context.Context, logger *slog.Logger, opts CleanupOpts) error {
 // A predicate it cannot compute fails rather than degrading to a no-op:
 // skipping a sweep the caller asked for would let disks fill after a HUP
 // commit with nobody noticing.
+//
+// With the overlays disabled, kexec boots the stock kernel whatever kernel is
+// committed, so the running system says nothing about the device: it fails.
 func pruneStaleOS(ctx context.Context, logger *slog.Logger, eng *Engine, containers []Container, dropped map[string]bool) []error {
+	data, err := os.ReadFile(procCmdline)
+	if err != nil {
+		return []error{fmt.Errorf("read kernel cmdline: %w", err)}
+	}
+	cmdline := string(data)
+	if overlaysDisabled(cmdline) {
+		return []error{errors.New("overlays disabled on the kernel cmdline: the running system may not be the committed one")}
+	}
 	kver, err := runningKernelVersion()
 	if err != nil {
 		return []error{fmt.Errorf("read running kernel version: %w", err)}
 	}
-	// A failure here is distinct from the legitimate "" result that
-	// runningKernelABIID returns when the balena_kernel_abi cmdline token is
-	// absent: it means we cannot tell whether abi-labelled images match the
-	// running kernel.
-	abiID, err := runningKernelABIID()
-	if err != nil {
-		return []error{fmt.Errorf("compute kernel ABI ID: %w", err)}
-	}
+	// Stock boot gives empty; abi claims fail as stale.
+	abiID := hostapp.ParseHostKernelABIID(cmdline)
 	osVersion, err := readOSVersion()
 	if err != nil {
 		return []error{fmt.Errorf("read OS version: %w", err)}
@@ -338,16 +343,12 @@ func runningKernelVersion() (string, error) {
 	return release, nil
 }
 
-// runningKernelABIID returns the kernel identity the initrd published for
-// the booted kernel: the balena_kernel_abi cmdline token, which carries the
-// sha256 of the kernel image that was kexec'd. Returns "" with nil error
-// when the token is absent (stock kernel boot): extensions that claim
-// kernel-abi-id against such a device fail their claim naturally through the
-// `stale` predicate.
-func runningKernelABIID() (string, error) {
-	data, err := os.ReadFile(procCmdline)
-	if err != nil {
-		return "", fmt.Errorf("read kernel cmdline: %w", err)
+// mobynit's kill switch rule: a substring of any token.
+func overlaysDisabled(cmdline string) bool {
+	for _, arg := range strings.Fields(cmdline) {
+		if strings.Contains(arg, "emergency") || strings.Contains(arg, "mobynit.no_overlays") {
+			return true
+		}
 	}
-	return hostapp.ParseHostKernelABIID(string(data)), nil
+	return false
 }
