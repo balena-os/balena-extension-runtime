@@ -185,11 +185,130 @@ func seedBlock(t *testing.T, fixture string) string {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "bootenv"), readFixture(t, fixture), 0o644))
 
-	prevMount, prevMounted := bootMount, isMounted
-	bootMount = dir
-	isMounted = func(path string) (bool, error) { return path == dir, nil }
-	t.Cleanup(func() { bootMount, isMounted = prevMount, prevMounted })
+	t.Cleanup(SetBootMount(dir))
 	return filepath.Join(dir, "bootenv")
+}
+
+// seedBlockIn writes a block into an existing candidate mountpoint.
+func seedBlockIn(t *testing.T, dir string) string {
+	t.Helper()
+	path := filepath.Join(dir, "bootenv")
+	require.NoError(t, os.WriteFile(path, readFixture(t, "created.bootenv"), 0o644))
+	return path
+}
+
+// One signed image is installed both ways: the boot partition is split only
+// under secure boot. Which mounts come up is a runtime fact, so the block
+// decides, not the mount table.
+func TestResolveBlockPath_PicksTheCandidateHoldingTheBlock(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		onNonenc bool
+	}{
+		{"a split device keeps the block on the non-encrypted mount", true},
+		{"the block is read where it is, not where it is expected", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			nonenc, boot := t.TempDir(), t.TempDir()
+			holder := boot
+			if tc.onNonenc {
+				holder = nonenc
+			}
+			want := seedBlockIn(t, holder)
+			defer setMounts(nonenc, boot, nonenc, boot)()
+
+			got, err := resolveBlockPath()
+			require.NoError(t, err)
+			assert.Equal(t, want, got)
+		})
+	}
+}
+
+// A signed image installed without secure boot never mounts the
+// non-encrypted candidate. Without balena-bootloader it has no block.
+func TestResolveBlockPath_ReportsNoBlockWhenAMountedCandidateHasNone(t *testing.T) {
+	nonenc, boot := t.TempDir(), t.TempDir()
+	defer setMounts(nonenc, boot, boot)()
+
+	_, err := resolveBlockPath()
+	assert.ErrorIs(t, err, ErrNoBlock)
+	assert.NotErrorIs(t, err, ErrNotMounted)
+}
+
+// An unsecured install of a signed image never mounts the non-encrypted
+// candidate and keeps the block on the other one. A found block outranks an
+// absent candidate, or every such device reports ErrNotMounted for good.
+func TestResolveBlockPath_PrefersAFoundBlockOverAnAbsentCandidate(t *testing.T) {
+	nonenc, boot := t.TempDir(), t.TempDir()
+	want := seedBlockIn(t, boot)
+	defer setMounts(nonenc, boot, boot)()
+
+	got, err := resolveBlockPath()
+	require.NoError(t, err)
+	assert.Equal(t, want, got)
+}
+
+// Every candidate mounted and none holding a block is a device with no
+// override axis, which is not a defect.
+func TestResolveBlockPath_ReportsNoBlockWhenEveryCandidateIsMounted(t *testing.T) {
+	nonenc, boot := t.TempDir(), t.TempDir()
+	defer setMounts(nonenc, boot, nonenc, boot)()
+
+	_, err := resolveBlockPath()
+	assert.ErrorIs(t, err, ErrNoBlock)
+	// Every candidate was stat'd, so the error names every block path.
+	assert.Contains(t, err.Error(), filepath.Join(nonenc, "bootenv"))
+	assert.Contains(t, err.Error(), filepath.Join(boot, "bootenv"))
+}
+
+// Two blocks mean the OS resolved the mount differently from this binary.
+// A verdict written to the file nobody reads is worse than a refusal.
+func TestResolveBlockPath_RefusesWhenBothCandidatesHoldABlock(t *testing.T) {
+	nonenc, boot := t.TempDir(), t.TempDir()
+	first, second := seedBlockIn(t, nonenc), seedBlockIn(t, boot)
+	defer setMounts(nonenc, boot, nonenc, boot)()
+
+	_, err := resolveBlockPath()
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrNoBlock)
+	assert.NotErrorIs(t, err, ErrNotMounted)
+	assert.Contains(t, err.Error(), first)
+	assert.Contains(t, err.Error(), second)
+}
+
+// The operator must learn every path that was tried, not only the first.
+func TestResolveBlockPath_NamesEveryCandidateWhenNoneIsMounted(t *testing.T) {
+	nonenc, boot := t.TempDir(), t.TempDir()
+	defer setMounts(nonenc, boot)()
+
+	_, err := resolveBlockPath()
+	require.ErrorIs(t, err, ErrNotMounted)
+	assert.Contains(t, err.Error(), nonenc)
+	assert.Contains(t, err.Error(), boot)
+}
+
+// An unsplit device links the same path into both variables. Counted twice,
+// its one block would read as the two the resolver refuses.
+func TestResolveBlockPath_UnsplitMountIsOneCandidate(t *testing.T) {
+	dir := t.TempDir()
+	want := seedBlockIn(t, dir)
+	defer setMounts(dir, dir, dir)()
+
+	got, err := resolveBlockPath()
+	require.NoError(t, err)
+	assert.Equal(t, want, got)
+}
+
+// mounts.IsMounted compares cleaned paths, so one mountpoint spelled two ways
+// is one mount. Counting it twice would refuse a device that has one block.
+func TestResolveBlockPath_UnsplitMountSpelledTwoWaysIsOneCandidate(t *testing.T) {
+	dir := t.TempDir()
+	want := seedBlockIn(t, dir)
+	defer setMounts(dir+"/", dir, dir)()
+
+	got, err := resolveBlockPath()
+	require.NoError(t, err)
+	assert.Equal(t, want, got)
 }
 
 // The arm and the trial reset are one write. Two writes would leave a window
@@ -254,15 +373,14 @@ func TestArm_UnmountedBootPartitionIsNotMounted(t *testing.T) {
 }
 
 func TestArm_AbsentBlockErrors(t *testing.T) {
-	seedBlock(t, "created.bootenv")
-	require.NoError(t, os.Remove(Path()))
+	require.NoError(t, os.Remove(seedBlock(t, "created.bootenv")))
 
 	assert.Error(t, Arm(strings.Repeat("4", 64)))
 }
 
 // Two writers serialise on the file lock, so neither loses the other's key.
 func TestUpdate_ConcurrentWritersKeepBothKeys(t *testing.T) {
-	seedBlock(t, "created.bootenv")
+	path := seedBlock(t, "created.bootenv")
 
 	var wg sync.WaitGroup
 	for _, key := range []string{"first", "second"} {
@@ -274,7 +392,7 @@ func TestUpdate_ConcurrentWritersKeepBothKeys(t *testing.T) {
 	}
 	wg.Wait()
 
-	block, err := os.ReadFile(Path())
+	block, err := os.ReadFile(path)
 	require.NoError(t, err)
 	env, err := Parse(block)
 	require.NoError(t, err)

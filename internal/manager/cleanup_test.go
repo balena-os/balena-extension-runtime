@@ -374,6 +374,9 @@ func TestCleanup_StaleOS_JudgesTheRunningSystem(t *testing.T) {
 		{name: "ABI differs", cmdline: abiToken("other")},
 		{name: "stock boot", cmdline: "console=tty1"},
 		{name: "cmdline unreadable", cmdline: "console=tty1", unreadable: true, wantErr: true, wantKept: true},
+		// kexec boots stock with overlays off, whatever kernel is committed
+		{name: "overlays disabled", cmdline: "console=tty1 mobynit.no_overlays", wantErr: true, wantKept: true},
+		{name: "emergency substring", cmdline: "console=tty1 systemd.unit=emergency.target", wantErr: true, wantKept: true},
 	}
 
 	for _, tc := range cases {

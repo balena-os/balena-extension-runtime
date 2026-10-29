@@ -23,6 +23,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 
@@ -47,9 +48,12 @@ const (
 	KeyTrial = "kernel_override_trial"
 )
 
-// Linked in from the build: the partition label is per-layer when signed.
-// Must stay a var; -X cannot reach a const and fails silently.
-var bootMount = "/mnt/boot"
+// Linked in from the build; they differ on every signed build.
+// Must stay vars; -X cannot reach a const and fails silently.
+var (
+	nonencBootMount = "/mnt/boot"
+	bootMount       = "/mnt/boot"
+)
 
 // isMounted is a test seam over the mount table read.
 var isMounted = mounts.IsMounted
@@ -61,18 +65,24 @@ var ErrNotMounted = errors.New("the boot partition is not mounted")
 // block. A u-boot device keeps its bootloader environment elsewhere.
 var ErrNoBlock = errors.New("no bootenv block on this device")
 
-// Path is the environment block's location on this build.
-func Path() string { return filepath.Join(bootMount, "bootenv") }
+// setMounts links in the candidates, declares which of them are mounted, and
+// returns a restore. The three move together, so only this takes them apart.
+func setMounts(nonenc, boot string, mounted ...string) func() {
+	prevNonenc, prevBoot, prevMounted := nonencBootMount, bootMount, isMounted
+	nonencBootMount, bootMount = nonenc, boot
+	// Clean like mounts.IsMounted does.
+	isMounted = func(p string) (bool, error) {
+		return slices.Contains(mounted, filepath.Clean(p)), nil
+	}
+	return func() {
+		nonencBootMount, bootMount, isMounted = prevNonenc, prevBoot, prevMounted
+	}
+}
 
 // SetBootMount points the package at another mountpoint and returns a
 // restore. The build links the device's value in through -X, so this is how
 // a test in another package reaches a block it can write.
-func SetBootMount(path string) func() {
-	prevMount, prevMounted := bootMount, isMounted
-	bootMount = path
-	isMounted = func(p string) (bool, error) { return p == path, nil }
-	return func() { bootMount, isMounted = prevMount, prevMounted }
-}
+func SetBootMount(path string) func() { return setMounts(path, path, path) }
 
 // Env is a block's entries, in block order, as grub keeps them.
 type Env struct {
@@ -175,18 +185,74 @@ func (e *Env) Marshal() ([]byte, error) {
 	return out, nil
 }
 
-// openBlock opens the block under the given flock mode. The mount check is
-// what separates an unmounted partition from a device that has no block.
-func openBlock(flag, how int) (*os.File, error) {
-	mounted, err := isMounted(bootMount)
-	if err != nil {
-		return nil, fmt.Errorf("checking whether %s is mounted: %w", bootMount, err)
+// blockCandidates lists the distinct paths the block can live at, the
+// non-encrypted mount first: a split device keeps the block there. The two
+// mounts are the same path unless the build is signed.
+//
+// The paths are cleaned because mounts.IsMounted compares them cleaned. One
+// mountpoint spelled two ways would otherwise stat as the two blocks that
+// resolveBlockPath refuses.
+func blockCandidates() []string {
+	nonenc, boot := filepath.Clean(nonencBootMount), filepath.Clean(bootMount)
+	if nonenc == boot {
+		return []string{filepath.Join(nonenc, "bootenv")}
 	}
-	if !mounted {
-		return nil, fmt.Errorf("%w: %s", ErrNotMounted, bootMount)
+	return []string{filepath.Join(nonenc, "bootenv"), filepath.Join(boot, "bootenv")}
+}
+
+// resolveBlockPath returns the block the device actually has. The OS resolves
+// the mount at run time from is_secured, while the build links both paths in
+// through -X, so the block decides, not the mount table.
+//
+// ErrNotMounted and ErrNoBlock are not interchangeable. No candidate mounted
+// is a boot defect. A mounted candidate and no block is a device with no
+// override axis: a signed image installed without secure boot never mounts
+// the non-encrypted candidate.
+func resolveBlockPath() (string, error) {
+	candidates := blockCandidates()
+	var found, missing []string
+	for _, path := range candidates {
+		mount := filepath.Dir(path)
+		mounted, err := isMounted(mount)
+		if err != nil {
+			return "", fmt.Errorf("checking whether %s is mounted: %w", mount, err)
+		}
+		if !mounted {
+			missing = append(missing, mount)
+			continue
+		}
+		if _, err := os.Stat(path); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return "", fmt.Errorf("stat %s: %w", path, err)
+		}
+		found = append(found, path)
 	}
 
-	path := Path()
+	// Two blocks: the OS disagrees with this binary.
+	if len(found) > 1 {
+		return "", fmt.Errorf("two bootenv blocks, %s and %s: the OS and this runtime disagree on the mount",
+			found[0], found[1])
+	}
+	if len(found) == 1 {
+		return found[0], nil
+	}
+	if len(missing) == len(candidates) {
+		return "", fmt.Errorf("%w: %s", ErrNotMounted, strings.Join(missing, ", "))
+	}
+
+	return "", fmt.Errorf("%w: %s", ErrNoBlock, strings.Join(candidates, ", "))
+}
+
+// openBlock opens the block under the given flock mode.
+func openBlock(flag, how int) (*os.File, error) {
+	path, err := resolveBlockPath()
+	if err != nil {
+		return nil, err
+	}
+
+	// The block can vanish after the stat.
 	f, err := os.OpenFile(path, flag, 0)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
