@@ -182,7 +182,7 @@ every machine.
 | Check | Failure class |
 |---|---|
 | A regular file under `/boot` in the image hashes to the ABI | verdict |
-| The image contains `Module.symvers` under `{usr/,}lib/modules` | verdict |
+| The image contains `Module.symvers` under `lib/modules`, in a release directory that resolves inside that directory | verdict |
 | `/mnt/state` is mounted | machine |
 | The ABI is not in `override-rejected` | verdict |
 | The fabricated volume is recorded, exists and contains the kernel | machine |
