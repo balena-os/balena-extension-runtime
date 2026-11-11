@@ -56,6 +56,7 @@ func activateRootfs(t *testing.T, root, content string) (string, string) {
 	modules := filepath.Join(rootfs, "usr", "lib", "modules", "6.6.20-test")
 	require.NoError(t, os.MkdirAll(modules, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(modules, "Module.symvers"), nil, 0o644))
+	require.NoError(t, os.Symlink("usr/lib", filepath.Join(rootfs, "lib")))
 	sum := sha256.Sum256([]byte(content))
 	return rootfs, hex.EncodeToString(sum[:])
 }
@@ -211,23 +212,105 @@ func TestActivate_MatchingKernelVersionIsAccepted(t *testing.T) {
 	}))
 }
 
-// A modules tree reached through a symlinked release directory is still a
-// modules tree; only the drivers' absence is the image's fault.
-func TestActivate_SymlinkedModulesTreeIsAccepted(t *testing.T) {
+// A rootfs without merged /usr keeps its drivers under a real lib/modules.
+func TestActivate_ModulesUnderRealLibIsAccepted(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	root := activateHost(t)
 	rootfs, abi := activateRootfs(t, root, "kernel")
 	fabricatedVolume(t, root, "c1", "ext_test_abc_boot")
-
-	real := filepath.Join(rootfs, "usr", "lib", "modules", "6.6.20-test")
-	elsewhere := filepath.Join(root, "modules-6.6.20-test")
-	require.NoError(t, os.Rename(real, elsewhere))
-	require.NoError(t, os.Symlink(elsewhere, real))
+	require.NoError(t, os.Remove(filepath.Join(rootfs, "lib")))
+	require.NoError(t, os.Rename(filepath.Join(rootfs, "usr", "lib"), filepath.Join(rootfs, "lib")))
 
 	require.NoError(t, activate(context.Background(), activateTestLogger, "c1", rootfs, map[string]string{
 		labels.Class:       labels.ClassOverlay,
 		labels.KernelABIID: abi,
 	}))
+}
+
+// mobynit resolves only lib/modules. An absolute lib link leaves the image,
+// so a real usr/lib/modules beside it must not arm.
+func TestActivate_AbsoluteLibLinkIsAVerdict(t *testing.T) {
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	root := activateHost(t)
+	rootfs, abi := activateRootfs(t, root, "kernel")
+	fabricatedVolume(t, root, "c1", "ext_test_abc_boot")
+	outside := filepath.Join(root, "outside-lib")
+	require.NoError(t, os.MkdirAll(filepath.Join(outside, "modules", "6.6.20-test"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(outside, "modules", "6.6.20-test", "Module.symvers"), nil, 0o644))
+	require.NoError(t, os.Remove(filepath.Join(rootfs, "lib")))
+	require.NoError(t, os.Symlink(outside, filepath.Join(rootfs, "lib")))
+
+	var armed int
+	armOverride = func(string) error {
+		armed++
+		return nil
+	}
+	err := activate(context.Background(), activateTestLogger, "c1", rootfs, map[string]string{
+		labels.Class:       labels.ClassOverlay,
+		labels.KernelABIID: abi,
+	})
+	assert.ErrorIs(t, err, errVerdict)
+	assert.Zero(t, armed)
+}
+
+// mobynit binds a release directory only when it resolves strictly under its
+// modules directory, inside the image. Arm the same layouts and no others. An
+// absolute link would also resolve against this host, not the image.
+func TestActivate_SymlinkedModulesTree(t *testing.T) {
+	const release = "6.6.20-test"
+	tests := []struct {
+		name   string
+		link   string
+		target func(root, rootfs string) string
+		accept bool
+	}{
+		{"release linked within the modules directory", "usr/lib/modules/" + release,
+			func(_, _ string) string { return release + "-real" }, true},
+		{"release linked elsewhere in the image", "usr/lib/modules/" + release,
+			func(_, _ string) string { return "../../../opt/" + release }, false},
+		{"release linked outside the image", "usr/lib/modules/" + release,
+			func(root, _ string) string { return filepath.Join(root, "outside", release) }, false},
+		{"usr/lib linked outside the image", "usr/lib",
+			func(root, _ string) string { return filepath.Join(root, "outside-lib") }, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+			root := activateHost(t)
+			rootfs, abi := activateRootfs(t, root, "kernel")
+			fabricatedVolume(t, root, "c1", "ext_test_abc_boot")
+
+			// Move the tree to where the link points, so only the
+			// link decides the verdict.
+			link := filepath.Join(rootfs, tt.link)
+			target := tt.target(root, rootfs)
+			dest := target
+			if !filepath.IsAbs(dest) {
+				dest = filepath.Join(filepath.Dir(link), dest)
+			}
+			require.NoError(t, os.MkdirAll(filepath.Dir(dest), 0o755))
+			require.NoError(t, os.Rename(link, dest))
+			require.NoError(t, os.Symlink(target, link))
+
+			var armed int
+			armOverride = func(string) error {
+				armed++
+				return nil
+			}
+
+			err := activate(context.Background(), activateTestLogger, "c1", rootfs, map[string]string{
+				labels.Class:       labels.ClassOverlay,
+				labels.KernelABIID: abi,
+			})
+			if tt.accept {
+				require.NoError(t, err)
+				assert.Equal(t, 1, armed)
+				return
+			}
+			assert.ErrorIs(t, err, errVerdict)
+			assert.Zero(t, armed)
+		})
+	}
 }
 
 // The published link names the kernel, so a volume that does not hold it

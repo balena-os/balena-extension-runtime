@@ -136,31 +136,53 @@ func activate(ctx context.Context, logger *slog.Logger, containerID, rootfs stri
 	return nil
 }
 
-// Where a kernel override carries its drivers. Both spellings, since /lib is
-// a symlink to /usr/lib only on a merged-usr rootfs.
-var modulesDirs = []string{"usr/lib/modules", "lib/modules"}
+// The one path mobynit claims and binds through. A merged-usr rootfs
+// reaches it through a relative lib link.
+const modulesDir = "lib/modules"
 
 // The release directory holding Module.symvers, the signal the build pairs
-// the kernel-abi-id label with. Empty when the image ships none.
+// the kernel-abi-id label with. Empty when the image ships none. A modules or
+// release directory that resolves outside its parent is a verdict: mobynit
+// would not bind it, and an absolute link reads this host, not the image.
 func moduleRelease(rootfs string) (string, error) {
-	for _, dir := range modulesDirs {
-		base := filepath.Join(rootfs, dir)
-		entries, err := os.ReadDir(base)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			return "", fmt.Errorf("read %s: %w", base, err)
+	realRoot, err := filepath.EvalSymlinks(rootfs)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s: %w", rootfs, err)
+	}
+	base := filepath.Join(rootfs, modulesDir)
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil
 		}
-		for _, e := range entries {
-			// Stat: a release directory may itself be a symlink.
-			info, err := os.Stat(filepath.Join(base, e.Name(), "Module.symvers"))
-			if err == nil && info.Mode().IsRegular() {
-				return e.Name(), nil
-			}
+		return "", fmt.Errorf("read %s: %w", base, err)
+	}
+	modules, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		return "", fmt.Errorf("resolve %s: %w", base, err)
+	}
+	if !strictlyUnder(realRoot, modules) {
+		return "", fmt.Errorf("%w: %s resolves outside the image", errVerdict, modulesDir)
+	}
+	for _, e := range entries {
+		release, err := filepath.EvalSymlinks(filepath.Join(modules, e.Name()))
+		if err != nil {
+			continue
+		}
+		if !strictlyUnder(modules, release) {
+			return "", fmt.Errorf("%w: %s/%s resolves outside %s", errVerdict, modulesDir, e.Name(), modulesDir)
+		}
+		info, err := os.Stat(filepath.Join(release, "Module.symvers"))
+		if err == nil && info.Mode().IsRegular() {
+			return e.Name(), nil
 		}
 	}
 	return "", nil
+}
+
+func strictlyUnder(parent, path string) bool {
+	rel, err := filepath.Rel(parent, path)
+	return err == nil && rel != "." && filepath.IsLocal(rel)
 }
 
 // The M.m.p the kernel-version label carries, with the release's

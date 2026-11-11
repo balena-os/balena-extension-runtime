@@ -183,13 +183,149 @@ func TestParse_DropsForeignCommentLines(t *testing.T) {
 func seedBlock(t *testing.T, fixture string) string {
 	t.Helper()
 	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "bootenv"), readFixture(t, fixture), 0o644))
+	t.Cleanup(SetBootMount(dir))
+	return writeBlock(t, dir, fixture)
+}
 
-	prevMount, prevMounted := bootMount, isMounted
-	bootMount = dir
-	isMounted = func(path string) (bool, error) { return path == dir, nil }
-	t.Cleanup(func() { bootMount, isMounted = prevMount, prevMounted })
-	return filepath.Join(dir, "bootenv")
+func writeBlock(t *testing.T, dir, fixture string) string {
+	t.Helper()
+	path := filepath.Join(dir, blockName)
+	require.NoError(t, os.WriteFile(path, readFixture(t, fixture), 0o644))
+	return path
+}
+
+// One signed image is installed both ways: the flasher splits the boot
+// partition only under secure boot. The layout picks the one partition the
+// block can be on, so a failed mount never reads as an absent block.
+func TestResolveBlockPath_FollowsTheLayout(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		split            bool
+		nonencUp, bootUp bool
+		blockOnNonenc    bool
+		blockOnBoot      bool
+		wantNonenc       bool
+		wantErr          error
+	}{
+		{name: "unsplit reads the boot partition", bootUp: true, blockOnBoot: true},
+		{name: "unsplit with no block has no override axis", bootUp: true, wantErr: ErrNoBlock},
+		{name: "unsplit with the boot partition down is a boot defect", blockOnBoot: true, wantErr: ErrNotMounted},
+		{name: "split reads the non-encrypted partition", split: true, nonencUp: true, blockOnNonenc: true, wantNonenc: true},
+		{name: "split never reads a block on the encrypted partition", split: true, nonencUp: true, bootUp: true, blockOnBoot: true, wantErr: ErrNoBlock},
+		{name: "split with the non-encrypted partition down is a boot defect", split: true, bootUp: true, blockOnBoot: true, wantErr: ErrNotMounted},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			nonenc, boot := t.TempDir(), t.TempDir()
+			if tc.blockOnNonenc {
+				writeBlock(t, nonenc, "created.bootenv")
+			}
+			if tc.blockOnBoot {
+				writeBlock(t, boot, "created.bootenv")
+			}
+			l := layout{partitions: map[string]string{encBootLabel: "enc"}, mounts: map[string]string{}}
+			if tc.split {
+				l.partitions[nonencBootLabel] = "nonenc"
+			}
+			if tc.nonencUp {
+				l.mounts["nonenc"] = nonenc
+			}
+			if tc.bootUp {
+				l.mounts["enc"] = boot
+			}
+			defer setLayout(l)()
+
+			got, err := resolveBlockPath()
+			if tc.wantErr != nil {
+				assert.ErrorIs(t, err, tc.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			want := filepath.Join(boot, blockName)
+			if tc.wantNonenc {
+				want = filepath.Join(nonenc, blockName)
+			}
+			assert.Equal(t, want, got)
+		})
+	}
+}
+
+// Neither label names a partition: udev has not linked the drive, or the OS
+// and this binary disagree. Either is a defect to retry, not a device with
+// no override axis.
+func TestResolveBlockPath_NoPartitionIsNotMounted(t *testing.T) {
+	defer setLayout(layout{})()
+
+	_, err := resolveBlockPath()
+	assert.ErrorIs(t, err, ErrNotMounted)
+}
+
+// The error names the one path that was checked.
+func TestResolveBlockPath_NoBlockNamesThePathChecked(t *testing.T) {
+	nonenc, boot := t.TempDir(), t.TempDir()
+	defer setLayout(layout{
+		partitions: map[string]string{nonencBootLabel: "nonenc", encBootLabel: "enc"},
+		mounts:     map[string]string{"nonenc": nonenc, "enc": boot},
+	})()
+
+	_, err := resolveBlockPath()
+	require.ErrorIs(t, err, ErrNoBlock)
+	assert.Contains(t, err.Error(), filepath.Join(nonenc, blockName))
+	assert.NotContains(t, err.Error(), boot)
+}
+
+// A probe that fails is neither verdict: the caller must not treat it as no
+// block.
+func TestResolveBlockPath_ProbeFailuresAreNeitherVerdict(t *testing.T) {
+	probeErr := errors.New("probe failed")
+	for _, tc := range []struct {
+		name string
+		fail func(dir string)
+	}{
+		{"partition lookup", func(string) {
+			partition = func(string) (string, error) { return "", probeErr }
+		}},
+		{"mount table", func(string) {
+			mountpointOf = func(string) (string, error) { return "", probeErr }
+		}},
+		{"block stat", func(dir string) {
+			// A file where a directory belongs fails with ENOTDIR.
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "file"), nil, 0o644))
+			mountpointOf = func(string) (string, error) { return filepath.Join(dir, "file"), nil }
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			defer SetBootMount(dir)()
+			tc.fail(dir)
+
+			_, err := resolveBlockPath()
+			require.Error(t, err)
+			assert.NotErrorIs(t, err, ErrNoBlock)
+			assert.NotErrorIs(t, err, ErrNotMounted)
+		})
+	}
+}
+
+// The real probe walks the by-state link to the device.
+func TestResolvePartition(t *testing.T) {
+	prev := byStateDir
+	byStateDir = t.TempDir()
+	t.Cleanup(func() { byStateDir = prev })
+
+	_, err := resolvePartition("balena-rpi")
+	assert.ErrorIs(t, err, errNoPartition, "no link is a device without the partition")
+
+	dev := filepath.Join(t.TempDir(), "mmcblk0p1")
+	require.NoError(t, os.WriteFile(dev, nil, 0o644))
+	require.NoError(t, os.Symlink(dev, filepath.Join(byStateDir, "balena-rpi")))
+	got, err := resolvePartition("balena-rpi")
+	require.NoError(t, err)
+	assert.Equal(t, dev, got)
+
+	require.NoError(t, os.Symlink(filepath.Join(byStateDir, "gone"), filepath.Join(byStateDir, "dangling")))
+	_, err = resolvePartition("dangling")
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, errNoPartition, "a link to a vanished device is a defect, not an absent partition")
 }
 
 // The arm and the trial reset are one write. Two writes would leave a window
@@ -246,23 +382,22 @@ func TestArm_RefusesAMalformedABIAndWritesNothing(t *testing.T) {
 
 func TestArm_UnmountedBootPartitionIsNotMounted(t *testing.T) {
 	seedBlock(t, "created.bootenv")
-	prev := isMounted
-	isMounted = func(string) (bool, error) { return false, nil }
-	t.Cleanup(func() { isMounted = prev })
+	prev := mountpointOf
+	mountpointOf = func(string) (string, error) { return "", nil }
+	t.Cleanup(func() { mountpointOf = prev })
 
 	assert.ErrorIs(t, Arm(strings.Repeat("3", 64)), ErrNotMounted)
 }
 
 func TestArm_AbsentBlockErrors(t *testing.T) {
-	seedBlock(t, "created.bootenv")
-	require.NoError(t, os.Remove(Path()))
+	require.NoError(t, os.Remove(seedBlock(t, "created.bootenv")))
 
 	assert.Error(t, Arm(strings.Repeat("4", 64)))
 }
 
 // Two writers serialise on the file lock, so neither loses the other's key.
 func TestUpdate_ConcurrentWritersKeepBothKeys(t *testing.T) {
-	seedBlock(t, "created.bootenv")
+	path := seedBlock(t, "created.bootenv")
 
 	var wg sync.WaitGroup
 	for _, key := range []string{"first", "second"} {
@@ -274,7 +409,7 @@ func TestUpdate_ConcurrentWritersKeepBothKeys(t *testing.T) {
 	}
 	wg.Wait()
 
-	block, err := os.ReadFile(Path())
+	block, err := os.ReadFile(path)
 	require.NoError(t, err)
 	env, err := Parse(block)
 	require.NoError(t, err)

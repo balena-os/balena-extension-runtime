@@ -154,6 +154,14 @@ contains different kernel bytes.
 | the ABI claim | a deployed extension image | the container store on disk |
 | the running ABI | the initramfs, through `/proc/cmdline` | memory only |
 
+The boot environment block is the `bootenv` file on the boot partition. A
+secure boot install splits the boot partition and keeps the block on the
+non-encrypted part. The runtime follows `/dev/disk/by-state/<label>` to the
+device and reads the block from its mount. It reads the
+non-encrypted partition when it exists, and the boot partition otherwise. An
+unmounted partition fails the command. The runtime does not fall back to the
+other partition.
+
 The boot environment block is plaintext and unauthenticated. `validate`,
 `hup commit` and `hup reject` first remove each ABI record whose value is not
 a 64-digit lowercase hex sha256. They also remove the trial count when they
@@ -174,7 +182,7 @@ every machine.
 | Check | Failure class |
 |---|---|
 | A regular file under `/boot` in the image hashes to the ABI | verdict |
-| The image contains `Module.symvers` under `{usr/,}lib/modules` | verdict |
+| The image contains `Module.symvers` under `lib/modules`, in a release directory that resolves inside that directory | verdict |
 | `/mnt/state` is mounted | machine |
 | The ABI is not in `override-rejected` | verdict |
 | The fabricated volume is recorded, exists and contains the kernel | machine |
@@ -358,6 +366,20 @@ volumes against it.
 `kernel-abi-id`, `kernel-version` or `os-version` label the running system does
 not satisfy. Use it only after a host OS update commits. Before the commit, a
 stale image is the rollback target.
+
+The pass fails and removes nothing when the stock kernel runs while the boot
+environment block arms an override. The running kernel then does not show the
+kernel the device will boot next. The kill switch (`emergency` or
+`mobynit.no_overlays`) boots the stock kernel and keeps the arm. A failed
+kexec also keeps the arm until its trials are spent. Stage 2 also boots stock
+when no extension claims the arm, when its kernel is not in `boot-by-abi`, or
+when its trial is spent and the slot has no committed override. `validate`
+clears each of these arms at boot. `hup commit` removes a malformed arm before
+the commit hooks run, so the pass never sees one.
+
+A failed pass is only a warning in `rollback-health`. Stale images stay on the
+data partition until the next host OS update commits. A device with no block
+has no override, so the pass judges the stock kernel.
 
 This pass does not remove volumes, on purpose. A withdrawn override on a
 device that never changes its OS leaves a volume that never becomes stale. A

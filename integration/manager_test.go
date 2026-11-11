@@ -12,6 +12,38 @@ import (
 
 // --- Cleanup tests ---
 
+// runStaleOS runs the sweep on a stock boot with no override armed. Earlier
+// tests leave an arm in the shared block.
+func runStaleOS(t *testing.T) (string, error) {
+	t.Helper()
+	seedBlock(t)
+	return runManager(t, "cleanup", "--stale-os")
+}
+
+// A stock boot with an override armed may boot the override next, so the
+// running kernel cannot judge the extensions built for it.
+func TestCleanup_StaleOS_RefusesAStockBootWithAnArm(t *testing.T) {
+	tag := uniqueName("ext-armed")
+	buildExtensionImage(t, tag)
+
+	id := dockerExec(t, "create",
+		"--label", "io.balena.image.class=overlay",
+		"--label", "io.balena.image.kernel-version=99.99.99",
+		tag, "none")
+	defer dockerExecMayFail(t, "rm", "-f", id)
+
+	seedBlock(t, "kernel_override_abi="+strings.Repeat("a", 64))
+	mgrOut, err := runManager(t, "cleanup", "--stale-os")
+	require.Error(t, err, "a stock boot with an arm must fail the sweep: %s", mgrOut)
+	// Any sweep failure satisfies the error alone, an unreadable block
+	// included, so the refusal has to name the arm.
+	require.Contains(t, mgrOut, "runs with an override armed",
+		"the sweep must refuse for the arm: %s", mgrOut)
+
+	out := dockerExec(t, "ps", "-a", "--filter", "id="+id, "--format", "{{.ID}}")
+	assert.NotEmpty(t, out, "the sweep must remove nothing")
+}
+
 // Plain `cleanup` must preserve stale-kernel containers (they are the
 // rollback target outside the HUP post-commit window).
 func TestCleanup_DeadOnly_KeepsStaleKernelContainers(t *testing.T) {
@@ -43,7 +75,7 @@ func TestCleanup_StaleOS_RemovesStaleKernelContainers(t *testing.T) {
 	out := dockerExec(t, "ps", "-a", "--filter", "id="+id, "--format", "{{.ID}}")
 	require.NotEmpty(t, out, "container should exist before cleanup")
 
-	mgrOut, err := runManager(t, "cleanup", "--stale-os")
+	mgrOut, err := runStaleOS(t)
 	require.NoError(t, err, "cleanup failed: %s", mgrOut)
 
 	out = dockerExec(t, "ps", "-a", "--filter", "id="+id, "--format", "{{.ID}}")
@@ -61,7 +93,7 @@ func TestCleanup_StaleOS_KeepsMatchingKernelContainers(t *testing.T) {
 		tag, "none")
 	defer dockerExecMayFail(t, "rm", "-f", id)
 
-	mgrOut, err := runManager(t, "cleanup", "--stale-os")
+	mgrOut, err := runStaleOS(t)
 	require.NoError(t, err, "cleanup failed: %s", mgrOut)
 
 	out := dockerExec(t, "ps", "-a", "--filter", "id="+id, "--format", "{{.ID}}")
@@ -89,7 +121,7 @@ func TestCleanup_StaleOS_RemovesOSStaleImages(t *testing.T) {
 	imageID := dockerExec(t, "images", "--filter", "reference="+tag, "--format", "{{.ID}}")
 	require.NotEmpty(t, imageID, "image should exist")
 
-	mgrOut, err := runManager(t, "cleanup", "--stale-os")
+	mgrOut, err := runStaleOS(t)
 	require.NoError(t, err, "cleanup failed: %s", mgrOut)
 
 	out, _ := dockerExecMayFail(t, "images", "--filter", "reference="+tag, "--format", "{{.ID}}")
@@ -102,7 +134,7 @@ func TestCleanup_StaleOS_KeepsMatchingOSImages(t *testing.T) {
 	buildExtensionImage(t, tag, "io.balena.image.os-version="+osVer)
 	defer dockerExecMayFail(t, "rmi", "-f", tag)
 
-	mgrOut, err := runManager(t, "cleanup", "--stale-os")
+	mgrOut, err := runStaleOS(t)
 	require.NoError(t, err, "cleanup failed: %s", mgrOut)
 
 	imageID := dockerExec(t, "images", "--filter", "reference="+tag, "--format", "{{.ID}}")
@@ -115,7 +147,7 @@ func TestCleanup_StaleOS_KeepsLegacyImages(t *testing.T) {
 	buildExtensionImage(t, tag)
 	defer dockerExecMayFail(t, "rmi", "-f", tag)
 
-	mgrOut, err := runManager(t, "cleanup", "--stale-os")
+	mgrOut, err := runStaleOS(t)
 	require.NoError(t, err, "cleanup failed: %s", mgrOut)
 
 	imageID := dockerExec(t, "images", "--filter", "reference="+tag, "--format", "{{.ID}}")
@@ -134,7 +166,7 @@ func TestCleanup_StaleOS_KeepsLegacyContainers(t *testing.T) {
 		tag, "none")
 	defer dockerExecMayFail(t, "rm", "-f", id)
 
-	mgrOut, err := runManager(t, "cleanup", "--stale-os")
+	mgrOut, err := runStaleOS(t)
 	require.NoError(t, err, "cleanup failed: %s", mgrOut)
 
 	out := dockerExec(t, "ps", "-a", "--filter", "id="+id, "--format", "{{.ID}}")
@@ -159,7 +191,7 @@ func TestCleanup_StaleOS_IgnoresNonExtensionContainers(t *testing.T) {
 		tag, "none")
 	defer dockerExecMayFail(t, "rm", "-f", id)
 
-	mgrOut, err := runManager(t, "cleanup", "--stale-os")
+	mgrOut, err := runStaleOS(t)
 	require.NoError(t, err, "cleanup failed: %s", mgrOut)
 
 	out := dockerExec(t, "ps", "-a", "--filter", "id="+id, "--format", "{{.ID}}")
@@ -186,7 +218,7 @@ func TestCleanup_StaleOS_OSVersionGlobMatches(t *testing.T) {
 		tag, "none")
 	defer dockerExecMayFail(t, "rm", "-f", id)
 
-	mgrOut, err := runManager(t, "cleanup", "--stale-os")
+	mgrOut, err := runStaleOS(t)
 	require.NoError(t, err, "cleanup failed: %s", mgrOut)
 
 	out := dockerExec(t, "ps", "-a", "--filter", "id="+id, "--format", "{{.ID}}")

@@ -48,6 +48,13 @@ func buildExtensionImageWithContent(t *testing.T, tag string, files map[string]s
 
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
+	// The usrmerge link the build class leaves; activation reads lib/modules.
+	require.NoError(t, tw.WriteHeader(&tar.Header{
+		Name:     "lib",
+		Linkname: "usr/lib",
+		Mode:     0o777,
+		Typeflag: tar.TypeSymlink,
+	}))
 	for path, content := range files {
 		require.NoError(t, tw.WriteHeader(&tar.Header{
 			Name:     path,

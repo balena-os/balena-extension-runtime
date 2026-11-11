@@ -4,18 +4,24 @@ MODULE := github.com/balena-os/balena-extension-runtime
 VERSION ?= dev
 GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 
-# The non-encrypted boot partition's mountpoint. The recipe passes its own
-# BALENA_NONENC_BOOT_MOUNT. An empty value from the command line beats ?=, and
-# would link an empty path that only fails on a device, so refuse it here.
-BOOT_MOUNT ?= /mnt/boot
-ifeq ($(strip $(BOOT_MOUNT)),)
-$(error BOOT_MOUNT is empty; the recipe must pass BALENA_NONENC_BOOT_MOUNT)
+# The boot partitions, by label. The runtime follows each label's by-state
+# link to its mount, so no mountpoint is linked in. An empty value from the
+# command line beats ?=, so refuse it here rather than link a value that only
+# fails on a device.
+NONENC_BOOT_LABEL ?= balena-boot
+ifeq ($(strip $(NONENC_BOOT_LABEL)),)
+$(error NONENC_BOOT_LABEL is empty; the recipe must pass BALENA_NONENC_BOOT_LABEL)
+endif
+ENC_BOOT_LABEL ?= resin-boot
+ifeq ($(strip $(ENC_BOOT_LABEL)),)
+$(error ENC_BOOT_LABEL is empty; the recipe must pass BALENA_ENC_BOOT_LABEL)
 endif
 
 LDFLAGS := -s -w \
 	-X $(MODULE)/internal/version.Version=$(VERSION) \
 	-X $(MODULE)/internal/version.GitCommit=$(GIT_COMMIT) \
-	-X $(MODULE)/internal/bootenv.bootMount=$(BOOT_MOUNT)
+	-X $(MODULE)/internal/bootenv.nonencBootLabel=$(NONENC_BOOT_LABEL) \
+	-X $(MODULE)/internal/bootenv.encBootLabel=$(ENC_BOOT_LABEL)
 
 # $(BINARY) is phony rather than a file target with sources listed: go build
 # does its own staleness check, and a file target with no prerequisites is
