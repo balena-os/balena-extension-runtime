@@ -1,4 +1,81 @@
 - commits:
+    - subject: "runtime: decline a modules tree that resolves outside the image"
+      hash: 8e2340e5503395760b61e7cc31f18ee9f71d73c2
+      body: |
+        The runtime armed kernel overrides whose modules tree mobynit does not
+        bind. An absolute link resolved against the host, and the runtime read
+        usr/lib/modules where mobynit reads only lib/modules. The next boot then
+        found no claim and booted the stock kernel. The runtime now resolves
+        lib/modules as mobynit does. It declines a modules or release directory
+        that resolves outside its parent.
+      footer:
+        Change-type: patch
+        change-type: patch
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+    - subject: "manager: fail the stale OS sweep on a stock boot with an armed override"
+      hash: a08f581be3fc18e8b8f195679a9b70a55418865c
+      body: >
+        On a stock kernel boot, the sweep treats every kernel override as
+
+        stale. The kill switch and a failed kexec boot the stock kernel but keep
+
+        the override armed in the boot environment block. The sweep then removed
+
+        the container and image of the override that the next boot may select.
+
+        The sweep now fails and removes nothing while the block arms an
+        override.
+      footer:
+        Change-type: patch
+        change-type: patch
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+    - subject: "bootenv: resolve the block's partition from the two boot labels"
+      hash: 3c889c879eb5ada6cfe953ba5333e743a9cd7283
+      body: >
+        The bootenv block holds the kernel override state across a boot. Under
+
+        secure boot the flasher splits the boot partition and puts the block on
+
+        the non-encrypted part. Otherwise the block is on the single boot
+
+        partition.
+
+
+        The build now links the two boot partition labels instead of a
+
+        mountpoint. The runtime follows `/dev/disk/by-state/<label>` to the
+        device
+
+        and reads the block from that device's mount. The resolver skips a label
+
+        that no partition carries, so an unsigned device reads its boot
+
+        partition. A partition that exists but is not mounted returns
+
+        ErrNotMounted.
+
+
+        The meta-balena recipe must pass `NONENC_BOOT_LABEL` and
+
+        `ENC_BOOT_LABEL` from `BALENA_NONENC_BOOT_LABEL` and
+        `BALENA_ENC_BOOT_LABEL`.
+      footer:
+        Change-type: patch
+        change-type: patch
+        Signed-off-by: Alex Gonzalez <alexg@balena.io>
+        signed-off-by: Alex Gonzalez <alexg@balena.io>
+      author: Alex Gonzalez
+      nested: []
+  version: 2.0.2
+  title: ""
+  date: 2026-11-11T10:37:54.201Z
+- commits:
     - subject: "validate: restore the rollback slot's arm when hup reject finds none"
       hash: d622a85c20dda75395449c0ee0307fcd6e906669
       body: |
