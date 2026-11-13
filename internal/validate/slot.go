@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/balena-os/balena-extension-runtime/internal/bootenv"
 )
@@ -18,9 +19,7 @@ var (
 	byLabelDir = "/dev/disk/by-label"
 )
 
-// The whole candidate set. The prefix is per-release and udev publishes the
-// inner filesystem's label, so on a LUKS device the dm source resolves here
-// without a special case.
+// The whole candidate set. The prefix is per-release.
 var rootLabels = map[string]bootenv.Slot{
 	"resin-rootA":  bootenv.SlotA,
 	"resin-rootB":  bootenv.SlotB,
@@ -37,10 +36,8 @@ func RunningSlot() (bootenv.Slot, error) {
 	if err != nil {
 		return "", err
 	}
-	resolved := resolve(source)
-
 	for label, slot := range rootLabels {
-		if resolve(filepath.Join(byLabelDir, label)) == resolved {
+		if sameDevice(filepath.Join(byLabelDir, label), source) {
 			return slot, nil
 		}
 	}
@@ -75,11 +72,27 @@ func activeSource() (string, error) {
 	return "", fmt.Errorf("%s is not in %s", activeRoot, procMounts)
 }
 
-// resolve follows a device link, leaving a source that is not a path alone
-// so it can still fail the comparison rather than the derivation.
-func resolve(path string) string {
-	if target, err := filepath.EvalSymlinks(path); err == nil {
-		return target
+// sameDevice reports whether labelPath and source name one block device.
+// Stat follows a symlink, so a by-label link and the node it names compare
+// equal, and so do two nodes with one device number.
+//
+// udev's by-label link names the node that holds the filesystem: the
+// partition on a plain device, the kernel dm node on LUKS. A plain mount
+// source is that same node. A LUKS source as /dev/mapper/luks-<uuid> can be
+// a second device node as /dev/dm-N, so the paths differ while the device
+// numbers match.
+func sameDevice(labelPath, source string) bool {
+	label, labelOK := deviceNumber(labelPath)
+	src, srcOK := deviceNumber(source)
+	return labelOK && srcOK && label == src
+}
+
+// deviceNumber returns the device number of a block node. Stat follows a
+// symlink to the node it names.
+func deviceNumber(path string) (uint64, bool) {
+	var st syscall.Stat_t
+	if syscall.Stat(path, &st) != nil || st.Mode&syscall.S_IFMT != syscall.S_IFBLK {
+		return 0, false
 	}
-	return path
+	return uint64(st.Rdev), true
 }
