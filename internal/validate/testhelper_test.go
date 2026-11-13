@@ -51,6 +51,9 @@ type world struct {
 
 	locks    int
 	lockHeld bool
+
+	// Device number of each fixture node, keyed by its own path.
+	nodes map[string]uint64
 }
 
 func newWorld(t *testing.T, entries ...string) *world {
@@ -59,6 +62,7 @@ func newWorld(t *testing.T, entries ...string) *world {
 		t:      t,
 		root:   t.TempDir(),
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		nodes:  map[string]uint64{},
 	}
 
 	boot := filepath.Join(w.root, "mnt", "boot")
@@ -85,9 +89,12 @@ func newWorld(t *testing.T, entries ...string) *world {
 	procMounts = filepath.Join(w.root, "proc-mounts")
 	byLabelDir = filepath.Join(w.root, "dev", "disk", "by-label")
 	procCmdline = filepath.Join(w.root, "proc-cmdline")
+	prevNumber := deviceNumber
+	deviceNumber = w.deviceNumber
 	t.Cleanup(func() {
 		procMounts, activeRoot, byLabelDir = prevMounts, prevActive, prevLabels
 		procCmdline = prevCmdline
+		deviceNumber = prevNumber
 	})
 	w.slotIs("resin-rootA")
 	w.runningIs("")
@@ -152,10 +159,29 @@ func (w *world) writeBlock(entries ...string) {
 func (w *world) slotIs(label string) {
 	w.t.Helper()
 	device := filepath.Join(w.root, "dev", "sda2")
-	require.NoError(w.t, os.MkdirAll(filepath.Dir(device), 0o755))
-	require.NoError(w.t, os.WriteFile(device, nil, 0o644))
+	w.blockNode(device, 0x0802)
 	w.mountedAs(device, device)
 	w.labels(map[string]string{label: device})
+}
+
+// blockNode creates path and assigns its device number.
+func (w *world) blockNode(path string, number uint64) {
+	w.t.Helper()
+	require.NoError(w.t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(w.t, os.RemoveAll(path))
+	require.NoError(w.t, os.WriteFile(path, nil, 0o644))
+	w.nodes[path] = number
+}
+
+// deviceNumber mocks statDeviceNumber. newWorld uses it in place of the
+// host stat. It returns the number blockNode stored for the associated path.
+func (w *world) deviceNumber(path string) (uint64, bool) {
+	target, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return 0, false
+	}
+	number, ok := w.nodes[target]
+	return number, ok
 }
 
 // mountedAs writes a mount table naming source as the running root, plus the

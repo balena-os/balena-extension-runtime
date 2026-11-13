@@ -42,13 +42,27 @@ func TestRunningSlot(t *testing.T) {
 			name: "a LUKS dm source",
 			setup: func(t *testing.T, w *world) {
 				dm := filepath.Join(w.root, "dev", "dm-0")
-				require.NoError(t, os.MkdirAll(filepath.Dir(dm), 0o755))
-				require.NoError(t, os.WriteFile(dm, nil, 0o644))
+				w.blockNode(dm, 0xfd00)
 				mapper := filepath.Join(w.root, "dev", "mapper")
 				require.NoError(t, os.MkdirAll(mapper, 0o755))
 				require.NoError(t, os.Symlink(dm, filepath.Join(mapper, "resin-rootA")))
 
 				w.mountedAs(filepath.Join(mapper, "resin-rootA"))
+				w.labels(map[string]string{"resin-rootA": dm})
+			},
+			want: bootenv.SlotA,
+		},
+		{
+			// /dev/mapper/luks-<uuid> and /dev/dm-N are two nodes. The seam
+			// gives them one device number.
+			name: "two LUKS nodes with one device number",
+			setup: func(t *testing.T, w *world) {
+				const number = uint64(0xfd01)
+				dm := filepath.Join(w.root, "dev", "dm-1")
+				mapper := filepath.Join(w.root, "dev", "mapper", "luks-8328016f")
+				w.blockNode(dm, number)
+				w.blockNode(mapper, number)
+				w.mountedAs(mapper)
 				w.labels(map[string]string{"resin-rootA": dm})
 			},
 			want: bootenv.SlotA,
